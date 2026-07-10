@@ -1,0 +1,6 @@
+{
+  "name": "Matrix Cloud Storage",
+  "description": "Unlimited binary storage website using Matrix Client-Server API and Firebase RTDB",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
