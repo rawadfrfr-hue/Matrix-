@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
@@ -123,6 +124,12 @@ function getDb() {
 }
 
 async function startServer() {
+  // Safe environment diagnostic logging (only logs variable names, never values)
+  const matrixKeys = Object.keys(process.env).filter(k => k.startsWith("MATRIX_"));
+  const firebaseKeys = Object.keys(process.env).filter(k => k.startsWith("FIREBASE_"));
+  console.log(`[Env Diagnostic] Detected Matrix keys in process.env:`, matrixKeys);
+  console.log(`[Env Diagnostic] Detected Firebase keys in process.env:`, firebaseKeys);
+
   const projectId = process.env.FIREBASE_PROJECT_ID || "zetta-cloud-79576";
   try {
     discoveredDatabaseURL = await discoverDatabaseUrl(projectId);
@@ -148,7 +155,13 @@ async function startServer() {
       
       const { MATRIX_HOMESERVER, MATRIX_ACCESS_TOKEN, MATRIX_ROOM_ID } = process.env;
       if (!MATRIX_HOMESERVER || !MATRIX_ACCESS_TOKEN) {
-        return res.status(500).json({ error: 'Matrix credentials missing (MATRIX_HOMESERVER, MATRIX_ACCESS_TOKEN).' });
+        const missing = [];
+        if (!MATRIX_HOMESERVER) missing.push('MATRIX_HOMESERVER');
+        if (!MATRIX_ACCESS_TOKEN) missing.push('MATRIX_ACCESS_TOKEN');
+        const detectedKeys = Object.keys(process.env).filter(k => k.startsWith('MATRIX_'));
+        const errStr = `Matrix credentials missing or empty in environment: ${missing.join(', ')}. Please verify that you added these under the 'Variables' tab in your Railway project, saved them, and redeployed the service. Detected Matrix keys: ${detectedKeys.length ? detectedKeys.join(', ') : 'None'}`;
+        console.error(`[Upload Error] ${errStr}`);
+        return res.status(500).json({ error: errStr });
       }
 
       const buffer = req.file.buffer;
