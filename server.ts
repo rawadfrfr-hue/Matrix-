@@ -239,6 +239,151 @@ async function startServer() {
   app.use(cors());
   app.use(express.json());
 
+  // 1a. GET PRESIGNED UPLOAD PARAMETERS (Cloudflare worker parity)
+  app.post('/api/get-upload-url', async (req, res) => {
+    try {
+      const fileName = req.body.fileName || 'file';
+      if (b2Accounts.length === 0) {
+        return res.status(500).json({ error: 'No B2 accounts configured' });
+      }
+
+      // Latency calculation: Select fastest account based on real-time ping
+      const pingPromises = b2Accounts.map(async (acct) => {
+        let url = acct.endpoint || "https://api.backblazeb2.com";
+        if (!url.startsWith('http://') && !url.startsWith('https://')) {
+          url = 'https://' + url;
+        }
+        const start = Date.now();
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 2000);
+          await fetch(url, { method: 'HEAD', signal: controller.signal });
+          clearTimeout(timeoutId);
+          return { acct, latency: Date.now() - start };
+        } catch {
+          try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 2000);
+            await fetch(url, { method: 'GET', signal: controller.signal });
+            clearTimeout(timeoutId);
+            return { acct, latency: Date.now() - start };
+          } catch {
+            return { acct, latency: 9999 };
+          }
+        }
+      });
+
+      const results = await Promise.all(pingPromises);
+      results.sort((a, b) => a.latency - b.latency);
+      const fastestAcct = results[0].acct;
+
+      // Authorize with B2 Native REST API
+      const credentials = Buffer.from(`${fastestAcct.keyId}:${fastestAcct.appKey}`).toString('base64');
+      const authRes = await fetch("https://api.backblazeb2.com/b2api/v2/b2_authorize_account", {
+        method: "GET",
+        headers: { "Authorization": `Basic ${credentials}` }
+      });
+      if (!authRes.ok) {
+        throw new Error(`B2 Authorize failed: ${await authRes.text()}`);
+      }
+      const authData: any = await authRes.json();
+
+      // Get bucket ID
+      const bucketRes = await fetch(`${authData.apiUrl}/b2api/v2/b2_list_buckets`, {
+        method: "POST",
+        headers: {
+          "Authorization": authData.authorizationToken,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ accountId: authData.accountId, bucketName: fastestAcct.bucket })
+      });
+      if (!bucketRes.ok) {
+        throw new Error(`B2 List Buckets failed: ${await bucketRes.text()}`);
+      }
+      const bucketData: any = await bucketRes.json();
+      const bucketId = bucketData.buckets[0].bucketId;
+
+      // Get upload URL
+      const uploadRes = await fetch(`${authData.apiUrl}/b2api/v2/b2_get_upload_url`, {
+        method: "POST",
+        headers: {
+          "Authorization": authData.authorizationToken,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ bucketId })
+      });
+      if (!uploadRes.ok) {
+        throw new Error(`B2 Get Upload URL failed: ${await uploadRes.text()}`);
+      }
+      const uploadData: any = await uploadRes.json();
+
+      const uniqueKey = `${Date.now()}-${fileName}`;
+
+      res.json({
+        uploadUrl: uploadData.uploadUrl,
+        uploadAuthToken: uploadData.authorizationToken,
+        b2FileId: uniqueKey,
+        b2AccountEmail: fastestAcct.email,
+        b2BucketName: fastestAcct.bucket
+      });
+    } catch (error: any) {
+      console.error('get-upload-url error:', error);
+      res.status(500).json({ error: error.message || 'Failed to generate upload URL' });
+    }
+  });
+
+  // 1b. LOG COMPLETED UPLOAD METADATA (Cloudflare worker parity)
+  app.post('/api/upload-metadata', async (req, res) => {
+    try {
+      const {
+        fileName,
+        fileSize,
+        mimeType,
+        b2AccountEmail,
+        b2BucketName,
+        b2FileId,
+        b2NativeFileId,
+        parentId,
+        ownerEmail,
+        thumbnailUrl
+      } = req.body;
+
+      const fileId = randomUUID();
+      const metadata = {
+        fileId,
+        fileName,
+        originalName: fileName,
+        mimeType: mimeType || 'application/octet-stream',
+        fileSize: Number(fileSize),
+        uploadDate: new Date().toISOString(),
+        b2AccountEmail,
+        b2BucketName,
+        b2FileId,
+        b2NativeFileId: b2NativeFileId || null,
+        parentId: parentId || null,
+        ownerEmail: ownerEmail || 'anonymous',
+        isTrashed: false,
+        isStarred: false,
+        thumbnailUrl: thumbnailUrl || null
+      };
+
+      const db = getDb();
+      await db.ref(`/files/${fileId}`).set(metadata);
+
+      // Update in-memory tracker
+      usedSpaceMap[b2AccountEmail] = (usedSpaceMap[b2AccountEmail] || 0) + Number(fileSize);
+      console.log(`[B2 Tracker] Updated used space for ${b2AccountEmail} to ${usedSpaceMap[b2AccountEmail]} bytes`);
+
+      res.json({
+        success: true,
+        metadata
+      });
+    } catch (error: any) {
+      console.error('upload-metadata error:', error);
+      res.status(500).json({ error: error.message || 'Failed to save metadata' });
+    }
+  });
+
   const storage = multer.memoryStorage();
   const upload = multer({ storage });
 
@@ -280,6 +425,10 @@ async function startServer() {
 
       // Generate unique file ID and save metadata to Firebase Database
       const fileId = randomUUID();
+      const isImage = (req.file.mimetype || '').startsWith('image/') || 
+                      req.file.originalname.match(/\.(jpg|jpeg|png|webp|gif|svg)$/i);
+      const thumbnailUrl = isImage ? `/api/download/${fileId}` : null;
+
       const metadata = {
         fileId,
         fileName: req.file.originalname,
@@ -293,7 +442,8 @@ async function startServer() {
         parentId: req.body.parentId || null,
         ownerEmail: req.body.ownerEmail || 'anonymous',
         isTrashed: false,
-        isStarred: false
+        isStarred: false,
+        thumbnailUrl
       };
 
       const db = getDb();
@@ -310,7 +460,9 @@ async function startServer() {
           fileName: metadata.fileName,
           fileSize: metadata.fileSize,
           uploadDate: metadata.uploadDate,
-          parentId: metadata.parentId
+          parentId: metadata.parentId,
+          mimeType: metadata.mimeType,
+          thumbnailUrl: metadata.thumbnailUrl
         }
       });
     } catch (error: any) {
@@ -406,6 +558,23 @@ async function startServer() {
       res.json(file);
     } catch (error: any) {
       res.status(500).json({ error: error.message || 'Failed to fetch file metadata' });
+    }
+  });
+
+  // 4b. UPDATE THUMBNAIL ROUTE
+  app.post('/api/file/:fileId/thumbnail', async (req, res) => {
+    try {
+      const fileId = req.params.fileId;
+      const { thumbnailUrl } = req.body;
+      if (!fileId || !thumbnailUrl) {
+        return res.status(400).json({ error: 'Missing fileId or thumbnailUrl' });
+      }
+      const db = getDb();
+      await db.ref(`/files/${fileId}`).update({ thumbnailUrl });
+      res.json({ success: true, message: 'Thumbnail updated successfully' });
+    } catch (error: any) {
+      console.error('Failed to update thumbnail:', error);
+      res.status(500).json({ error: error.message || 'Failed to update thumbnail' });
     }
   });
 

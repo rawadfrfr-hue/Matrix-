@@ -13,6 +13,7 @@ export interface StorageItem {
   isTrashed: boolean;
   fileId?: string;
   isStarred?: boolean;
+  thumbnailUrl?: string | null;
 }
 
 export type ActiveTab = 'files' | 'recent' | 'starred' | 'trash' | 'account';

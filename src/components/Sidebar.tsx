@@ -83,7 +83,7 @@ export default function Sidebar({
                 </svg>
               </div>
               <span className="font-display font-bold text-lg tracking-tight text-white">
-                Nebula<span className="bg-gradient-to-r from-[#0095ff] to-cyan-400 bg-clip-text text-transparent"> Drive</span>
+                Root<span className="bg-gradient-to-r from-[#0095ff] to-cyan-400 bg-clip-text text-transparent"> Haven</span>
               </span>
             </div>
             
@@ -131,18 +131,30 @@ export default function Sidebar({
           <div className="bg-[#161b22]/50 border border-white/5 rounded-2xl p-4 space-y-4">
             <div className="flex justify-between items-center">
               <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Cloud Stats</span>
-              <span className="bg-[#0095ff]/10 text-[#0095ff] text-[9px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider">Unlimited</span>
+              <span className="bg-[#0095ff]/10 text-[#0095ff] text-[9px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider">5 GB Free</span>
             </div>
             <div className="space-y-2">
               <div className="flex justify-between text-xs text-slate-400">
-                <span>Space Used</span>
-                <span className="font-semibold text-slate-200">{formatBytes(totalFilesSize)}</span>
+                <span>Storage Used</span>
+                <span className="font-semibold text-slate-200">
+                  {(() => {
+                    const quota = 5 * 1024 * 1024 * 1024; // 5 GB in bytes
+                    const usedPercent = Math.min(100, Math.max(0, (totalFilesSize / quota) * 100));
+                    return `${usedPercent % 1 === 0 ? usedPercent.toFixed(0) : usedPercent.toFixed(1)}%`;
+                  })()}
+                </span>
               </div>
               <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
                 {/* Dynamically update the progress bar */}
                 <div 
                   className="bg-[#0095ff] h-1.5 rounded-full transition-all duration-500 shadow-[0_0_8px_rgba(0,149,255,0.4)]" 
-                  style={{ width: totalFilesSize > 0 ? `${Math.min(95, Math.max(5, (totalFilesSize / 100000000) * 100))}%` : '2%' }} 
+                  style={{ 
+                    width: (() => {
+                      const quota = 5 * 1024 * 1024 * 1024; // 5 GB in bytes
+                      const usedPercent = Math.min(100, Math.max(0, (totalFilesSize / quota) * 100));
+                      return `${usedPercent}%`;
+                    })()
+                  }} 
                 />
               </div>
             </div>

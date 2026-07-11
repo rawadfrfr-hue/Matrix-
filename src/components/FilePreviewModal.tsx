@@ -353,11 +353,11 @@ export default function FilePreviewModal({
             <div className="w-full bg-[#0d1117] border border-white/5 rounded-2xl p-5 overflow-auto max-h-[50vh] font-mono text-xs text-slate-300 leading-relaxed text-left">
               <p className="text-slate-500 border-b border-white/5 pb-2 mb-3">// File content raw preview</p>
               <pre className="whitespace-pre-wrap">
-                {`Nebula Drive Integrity Header Verified.
+                {`Root Haven Integrity Header Verified.
 File Reference ID: ${item.fileId || 'MOCK-REF-772'}
 Node Partition: Cloud Sync v1
 
-This is a preview of your uploaded text document. Nebula Drive preserves all binary configurations and file attributes across Backblaze B2 storage safely.
+This is a preview of your uploaded text document. Root Haven preserves all binary configurations and file attributes across Backblaze B2 storage safely.
 
 [Active Sync Log]
 - Integrity status: Pristine

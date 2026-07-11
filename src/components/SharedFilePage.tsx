@@ -215,7 +215,7 @@ export default function SharedFilePage({ fileId, onClose }: SharedFilePageProps)
             </div>
             <div>
               <span className="font-display font-bold text-xl tracking-tight text-white block">
-                Nebula<span className="bg-gradient-to-r from-[#0095ff] to-cyan-400 bg-clip-text text-transparent"> Drive</span>
+                Root<span className="bg-gradient-to-r from-[#0095ff] to-cyan-400 bg-clip-text text-transparent"> Haven</span>
               </span>
               <span className="text-[10px] text-slate-500 font-bold tracking-wider uppercase block">Secure Cloud Storage</span>
             </div>
@@ -462,7 +462,7 @@ export default function SharedFilePage({ fileId, onClose }: SharedFilePageProps)
 
       {/* Footer copyright */}
       <footer className="border-t border-white/5 py-6 bg-[#040609] text-center text-xs text-slate-500">
-        <p>© {new Date().getFullYear()} Nebula Drive, inc. All binary pathways verified.</p>
+        <p>© {new Date().getFullYear()} Root Haven, inc. All binary pathways verified.</p>
       </footer>
     </div>
   );

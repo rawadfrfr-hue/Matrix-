@@ -36,10 +36,12 @@ import {
 } from 'lucide-react';
 
 import { StorageItem, ActiveTab, ViewMode } from './types';
+import { motion, AnimatePresence } from 'motion/react';
 import LandingPage from './components/LandingPage';
 import FilePreviewModal from './components/FilePreviewModal';
 import Sidebar from './components/Sidebar';
 import SharedFilePage from './components/SharedFilePage';
+import { generateVideoThumbnail, generateVideoThumbnailFromUrl } from './utils/thumbnail';
 
 export default function App() {
   // Authentication State
@@ -90,6 +92,7 @@ export default function App() {
   const [appError, setAppError] = useState('');
   
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const processedThumbnailIds = useRef<Set<string>>(new Set());
 
   // FAB & New Text File States
   const [isFabOpen, setIsFabOpen] = useState(false);
@@ -167,7 +170,8 @@ export default function App() {
             parentId: f.parentId || null,
             isTrashed: f.isTrashed || false,
             fileId: f.fileId,
-            isStarred: f.isStarred || false
+            isStarred: f.isStarred || false,
+            thumbnailUrl: f.thumbnailUrl || null
           }));
 
         setItems(prevItems => {
@@ -195,6 +199,59 @@ export default function App() {
       fetchBackendFiles();
     }
   }, [user]);
+
+  // Background thumbnail generation effect for videos without a thumbnail
+  useEffect(() => {
+    if (!user || items.length === 0) return;
+
+    const itemsToProcess = items.filter(item => {
+      if (item.type !== 'file' || !item.fileId) return false;
+      if (item.id.startsWith('preset-')) return false;
+      const isVideo = item.name.match(/\.(mp4|webm|mov|avi|mkv)$/i);
+      if (!isVideo) return false;
+      if (item.thumbnailUrl) return false;
+      if (processedThumbnailIds.current.has(item.id)) return false;
+      return true;
+    });
+
+    if (itemsToProcess.length === 0) return;
+
+    const processNext = async () => {
+      const nextItem = itemsToProcess[0];
+      if (!nextItem || !nextItem.fileId) return;
+
+      processedThumbnailIds.current.add(nextItem.id);
+      
+      try {
+        const downloadUrl = `/api/download/${nextItem.fileId}`;
+        const base64Thumb = await generateVideoThumbnailFromUrl(downloadUrl);
+        
+        // Update local state
+        setItems(prev => prev.map(item => {
+          if (item.id === nextItem.id) {
+            return { ...item, thumbnailUrl: base64Thumb };
+          }
+          return item;
+        }));
+
+        // Send to backend silently
+        await fetch(`/api/file/${nextItem.fileId}/thumbnail`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ thumbnailUrl: base64Thumb })
+        });
+      } catch (err) {
+        console.warn(`Failed background video thumbnail generation for ${nextItem.name}:`, err);
+      }
+    };
+
+    // Delay background generation slightly to not interfere with page load or rendering
+    const timer = setTimeout(() => {
+      processNext();
+    }, 1500);
+
+    return () => clearTimeout(timer);
+  }, [items, user]);
 
   const saveItems = (newItems: StorageItem[]) => {
     setItems(newItems);
@@ -422,69 +479,134 @@ export default function App() {
   };
 
   // XML Multipart upload with real-time feedback
-  const handleUpload = (file: File) => {
+  const handleUpload = async (file: File) => {
     setAppError('');
     setUploading(true);
     setUploadProgress(0);
     setCurrentUploadingName(file.name);
 
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/upload');
-    
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) {
-        setUploadProgress(Math.round((e.loaded / e.total) * 100));
-      }
-    };
+    try {
+      // 1. Get pre-signed upload params from Cloudflare Worker
+      const getParamsRes = await fetch('/api/get-upload-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileName: file.name })
+      });
 
-    xhr.onload = () => {
+      if (!getParamsRes.ok) {
+        const errJson = await getParamsRes.json().catch(() => ({}));
+        throw new Error(errJson.error || 'Failed to initialize upload session');
+      }
+
+      const { uploadUrl, uploadAuthToken, b2FileId, b2AccountEmail, b2BucketName } = await getParamsRes.json();
+
+      // 2. Perform direct upload to Backblaze B2 (Zero Server Load)
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', uploadUrl);
+      xhr.setRequestHeader('Authorization', uploadAuthToken);
+      xhr.setRequestHeader('X-Bz-File-Name', encodeURIComponent(b2FileId));
+      xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+      xhr.setRequestHeader('X-Bz-Content-Sha1', 'do_not_verify');
+
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          setUploadProgress(Math.round((e.loaded / e.total) * 100));
+        }
+      };
+
+      xhr.onload = async () => {
+        if (xhr.status === 200) {
+          try {
+            const b2Res = JSON.parse(xhr.responseText);
+            const b2NativeFileId = b2Res.fileId; // The unique B2 native file ID
+
+            // Handle optional video thumbnail locally
+            const isVideo = file.type.startsWith('video/') || file.name.match(/\.(mp4|webm|mov|avi|mkv)$/i);
+            let localThumbnailUrl = null;
+            if (isVideo) {
+              try {
+                localThumbnailUrl = await generateVideoThumbnail(file);
+              } catch (thumbErr) {
+                console.warn('Failed to generate local video thumbnail:', thumbErr);
+              }
+            }
+
+            // 3. Log completed upload metadata to Firebase via Cloudflare Worker
+            const logRes = await fetch('/api/upload-metadata', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                fileName: file.name,
+                fileSize: file.size,
+                mimeType: file.type || 'application/octet-stream',
+                b2AccountEmail,
+                b2BucketName,
+                b2FileId,
+                b2NativeFileId,
+                parentId: currentFolderId || null,
+                ownerEmail: user ? user.email : 'anonymous',
+                thumbnailUrl: localThumbnailUrl
+              })
+            });
+
+            if (!logRes.ok) {
+              const errJson = await logRes.json().catch(() => ({}));
+              throw new Error(errJson.error || 'Failed to log upload metadata');
+            }
+
+            const { metadata } = await logRes.json();
+            const uploadedItem: StorageItem = {
+              id: metadata.fileId,
+              name: metadata.fileName,
+              type: 'file',
+              size: metadata.fileSize,
+              uploadDate: metadata.uploadDate,
+              parentId: metadata.parentId,
+              isTrashed: false,
+              fileId: metadata.fileId,
+              isStarred: false,
+              thumbnailUrl: metadata.thumbnailUrl || null
+            };
+
+            saveItems([...items, uploadedItem]);
+            setUploading(false);
+            setUploadProgress(0);
+            setCurrentUploadingName('');
+          } catch (err: any) {
+            setUploading(false);
+            setUploadProgress(0);
+            setCurrentUploadingName('');
+            setAppError(err.message || 'Upload succeeded but metadata storage failed.');
+          }
+        } else {
+          setUploading(false);
+          setUploadProgress(0);
+          setCurrentUploadingName('');
+          try {
+            const res = JSON.parse(xhr.responseText);
+            setAppError(res.error || `Direct B2 upload failed with status ${xhr.status}`);
+          } catch {
+            setAppError(`Direct B2 upload failed with status ${xhr.status}`);
+          }
+        }
+      };
+
+      xhr.onerror = () => {
+        setUploading(false);
+        setUploadProgress(0);
+        setCurrentUploadingName('');
+        setAppError('Network error occurred during direct B2 upload.');
+      };
+
+      // Send raw file binary directly to B2 (Zero server load)
+      xhr.send(file);
+
+    } catch (err: any) {
       setUploading(false);
       setUploadProgress(0);
       setCurrentUploadingName('');
-      if (xhr.status === 200) {
-        try {
-          const res = JSON.parse(xhr.responseText);
-          const uploadedItem: StorageItem = {
-            id: res.metadata.fileId,
-            name: res.metadata.fileName,
-            type: 'file',
-            size: res.metadata.fileSize,
-            uploadDate: res.metadata.uploadDate,
-            parentId: currentFolderId,
-            isTrashed: false,
-            fileId: res.metadata.fileId,
-            isStarred: false
-          };
-          saveItems([...items, uploadedItem]);
-        } catch {
-          fetchBackendFiles();
-        }
-      } else {
-        try {
-          const res = JSON.parse(xhr.responseText);
-          setAppError(res.error || 'Upload failed');
-        } catch {
-          setAppError('Upload failed with status ' + xhr.status);
-        }
-      }
-    };
-
-    xhr.onerror = () => {
-      setUploading(false);
-      setUploadProgress(0);
-      setCurrentUploadingName('');
-      setAppError('Network error occurred during upload.');
-    };
-
-    const formData = new FormData();
-    formData.append('file', file);
-    if (currentFolderId) {
-      formData.append('parentId', currentFolderId);
+      setAppError(err.message || 'Failed to start upload session');
     }
-    if (user) {
-      formData.append('ownerEmail', user.email);
-    }
-    xhr.send(formData);
   };
 
   const downloadFile = (fileId: string) => {
@@ -537,7 +659,22 @@ export default function App() {
     if (ext.match(/(png|jpg|jpeg|gif|webp|svg)/)) {
       return { icon: ImageIcon, bg: 'bg-sky-500/10 text-sky-400 border border-sky-500/20' };
     }
-    return { icon: FileText, bg: 'bg-blue-500/10 text-blue-400 border border-blue-500/20' };
+    if (ext === 'pdf') {
+      return { icon: FileText, bg: 'bg-red-500/10 text-red-400 border border-red-500/20' };
+    }
+    if (ext.match(/(doc|docx)/)) {
+      return { icon: FileText, bg: 'bg-blue-500/10 text-blue-400 border border-blue-500/20' };
+    }
+    if (ext.match(/(xls|xlsx|csv)/)) {
+      return { icon: FileText, bg: 'bg-teal-500/10 text-teal-400 border border-teal-500/20' };
+    }
+    if (ext === 'apk') {
+      return { icon: FileIcon, bg: 'bg-lime-500/10 text-lime-400 border border-lime-500/20' };
+    }
+    if (ext.match(/(txt|md|json|js|ts|html|css)/)) {
+      return { icon: FileText, bg: 'bg-slate-500/10 text-slate-400 border border-white/10' };
+    }
+    return { icon: FileIcon, bg: 'bg-violet-500/10 text-violet-400 border border-violet-500/20' };
   };
 
   // Calculated and Filtered lists
@@ -659,7 +796,7 @@ export default function App() {
           {/* Centered Floating Brand Identifier */}
           <div className="absolute left-1/2 -translate-x-1/2 hidden lg:flex items-center gap-1.5 px-3 py-1 bg-white/5 border border-white/10 rounded-full shadow-inner">
             <span className="w-1.5 h-1.5 rounded-full bg-[#0095ff] shadow-[0_0_6px_rgba(0,149,255,0.8)]" />
-            <span className="text-[10px] font-bold text-slate-300 tracking-wider font-mono">NEBULA DRIVE</span>
+            <span className="text-[10px] font-bold text-slate-300 tracking-wider font-mono">ROOT HAVEN</span>
           </div>
 
           {/* Server Sync Indicator & Avatar */}
@@ -712,23 +849,65 @@ export default function App() {
               </div>
 
               {/* Uploading Status Overlay card */}
-              {uploading && (
-                <div className="bg-[#161b22]/80 border border-white/10 p-4 rounded-2xl flex items-center justify-between gap-3 animate-pulse-soft">
-                  <div className="flex items-center gap-3 w-full">
-                    <Loader2 className="w-4 h-4 animate-spin text-[#0095ff]" />
-                    <div className="flex-1 max-w-xl flex items-center gap-2 min-w-0">
-                      <span className="text-xs font-semibold text-slate-200 truncate">{currentUploadingName}</span>
-                      <span className="text-[10px] text-[#0095ff] font-bold whitespace-nowrap">{uploadProgress}%</span>
-                      <div className="flex-1 h-1.5 bg-slate-800 rounded-full overflow-hidden">
-                        <div 
-                          className="h-full bg-[#0095ff] transition-all duration-300 rounded-full"
-                          style={{ width: `${uploadProgress}%` }}
+              <AnimatePresence>
+                {uploading && (
+                  <motion.div 
+                    initial={{ opacity: 0, y: 15, scale: 0.95 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: -10, scale: 0.95 }}
+                    transition={{ type: 'spring', damping: 20, stiffness: 150 }}
+                    className="relative bg-gradient-to-br from-[#161b22] to-[#1e2530] border border-white/10 p-5 rounded-3xl shadow-[0_12px_40px_rgba(0,0,0,0.5)] overflow-hidden flex flex-col gap-3 w-full"
+                  >
+                    {/* Glowing background accent */}
+                    <div className="absolute top-0 left-0 w-32 h-32 bg-[#0095ff]/5 rounded-full blur-2xl pointer-events-none" />
+                    
+                    <div className="flex items-center gap-4 relative z-10">
+                      {/* Animated Upload Icon Box */}
+                      <div className="relative w-12 h-12 bg-[#0095ff]/10 rounded-2xl flex items-center justify-center border border-[#0095ff]/20 overflow-hidden flex-shrink-0">
+                        {/* Pulse Ring */}
+                        <motion.div 
+                          className="absolute inset-0 bg-[#0095ff]/10 rounded-2xl"
+                          animate={{ scale: [1, 1.15, 1], opacity: [0.5, 0, 0.5] }}
+                          transition={{ repeat: Infinity, duration: 2, ease: "easeInOut" }}
                         />
+                        {/* Floating File/Upload Icon */}
+                        <motion.div
+                          animate={{ y: [-2, 2, -2] }}
+                          transition={{ repeat: Infinity, duration: 1.8, ease: "easeInOut" }}
+                          className="text-[#0095ff]"
+                        >
+                          <UploadCloud className="w-6 h-6" />
+                        </motion.div>
+                      </div>
+
+                      {/* File Details & Status */}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-baseline justify-between gap-2">
+                          <span className="text-xs font-semibold text-slate-400 font-mono tracking-wide uppercase">
+                            Uploading your file...
+                          </span>
+                          <span className="text-sm font-black text-[#0095ff] font-mono">
+                            {uploadProgress}%
+                          </span>
+                        </div>
+                        <p className="text-sm font-semibold text-white truncate mt-0.5 max-w-[280px] sm:max-w-[400px]">
+                          {currentUploadingName}
+                        </p>
                       </div>
                     </div>
-                  </div>
-                </div>
-              )}
+
+                    {/* Progress Bar Container */}
+                    <div className="relative w-full h-2 bg-slate-800/80 rounded-full overflow-hidden border border-white/5 p-[1px] z-10">
+                      <motion.div 
+                        className="h-full rounded-full bg-gradient-to-r from-[#0095ff] via-cyan-400 to-[#0095ff] shadow-[0_0_8px_rgba(0,149,255,0.6)]"
+                        initial={{ width: '0%' }}
+                        animate={{ width: `${uploadProgress}%` }}
+                        transition={{ ease: "easeOut", duration: 0.3 }}
+                      />
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
 
               {/* Hidden File Input for Triggering Upload via Floating Action Button */}
               <input
@@ -804,13 +983,42 @@ export default function App() {
                       >
                         {/* Upper row: icon and three-dots */}
                         <div className="flex items-start justify-between">
-                          <div 
-                            onClick={() => { if (isFolder) setCurrentFolderId(item.id); }}
-                            className={`p-3 rounded-2xl transition-transform group-hover:scale-105 duration-300
-                              ${isFolder ? 'bg-[#0095ff]/10 text-[#0095ff] border border-[#0095ff]/20' : formatDetails.bg}`}
-                          >
-                            <CardIcon className="w-5 h-5" />
-                          </div>
+                          {item.thumbnailUrl ? (
+                            <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-2xl overflow-hidden border border-white/10 bg-slate-900/40 flex items-center justify-center relative group-hover:scale-105 transition-transform duration-300 shadow-inner">
+                              <div className="absolute inset-0 bg-white/5 animate-pulse" />
+                              <img 
+                                src={item.thumbnailUrl} 
+                                alt={item.name}
+                                className="w-full h-full object-cover relative z-10 transition-opacity duration-500"
+                                style={{ opacity: 0 }}
+                                onLoad={(e) => {
+                                  e.currentTarget.style.opacity = '1';
+                                }}
+                                referrerPolicy="no-referrer"
+                              />
+                            </div>
+                          ) : item.name?.match(/\.(mp3|wav|m4a|aac|ogg)$/i) ? (
+                            <div 
+                              onClick={() => { if (isFolder) setCurrentFolderId(item.id); }}
+                              className="p-3 rounded-2xl transition-transform group-hover:scale-105 duration-300 flex-shrink-0 bg-amber-500/10 text-amber-400 border border-amber-500/20 flex flex-col items-center justify-center"
+                            >
+                              <CardIcon className="w-5 h-5 animate-pulse" />
+                              <div className="flex items-end gap-0.5 h-2.5 mt-1.5 justify-center">
+                                <span className="w-0.5 bg-amber-400 rounded-full animate-bounce h-1.5" style={{ animationDelay: '0.1s' }} />
+                                <span className="w-0.5 bg-amber-400 rounded-full animate-bounce h-2.5" style={{ animationDelay: '0.3s' }} />
+                                <span className="w-0.5 bg-amber-400 rounded-full animate-bounce h-1" style={{ animationDelay: '0.5s' }} />
+                                <span className="w-0.5 bg-amber-400 rounded-full animate-bounce h-2" style={{ animationDelay: '0.2s' }} />
+                              </div>
+                            </div>
+                          ) : (
+                            <div 
+                              onClick={() => { if (isFolder) setCurrentFolderId(item.id); }}
+                              className={`p-3 rounded-2xl transition-transform group-hover:scale-105 duration-300 flex-shrink-0
+                                ${isFolder ? 'bg-[#0095ff]/10 text-[#0095ff] border border-[#0095ff]/20' : formatDetails.bg}`}
+                            >
+                              <CardIcon className="w-5 h-5" />
+                            </div>
+                          )}
 
                           {/* Float Menu Toggle */}
                           <div className="relative">
@@ -924,9 +1132,29 @@ export default function App() {
                         className="p-4 hover:bg-white/5 transition-all flex items-center justify-between gap-4 cursor-pointer group first:rounded-t-[22px] last:rounded-b-[22px]"
                       >
                         <div className="flex items-center gap-4 min-w-0">
-                          <div className={`p-2.5 rounded-xl flex-shrink-0 ${isFolder ? 'bg-[#0095ff]/10 text-[#0095ff]' : formatDetails.bg}`}>
-                            <CardIcon className="w-4.5 h-4.5" />
-                          </div>
+                          {item.thumbnailUrl ? (
+                            <div className="w-9 h-9 rounded-xl overflow-hidden border border-white/10 bg-slate-900/40 flex items-center justify-center relative flex-shrink-0">
+                              <div className="absolute inset-0 bg-white/5 animate-pulse" />
+                              <img 
+                                src={item.thumbnailUrl} 
+                                alt={item.name}
+                                className="w-full h-full object-cover relative z-10 transition-opacity duration-300"
+                                style={{ opacity: 0 }}
+                                onLoad={(e) => {
+                                  e.currentTarget.style.opacity = '1';
+                                }}
+                                referrerPolicy="no-referrer"
+                              />
+                            </div>
+                          ) : item.name?.match(/\.(mp3|wav|m4a|aac|ogg)$/i) ? (
+                            <div className="w-9 h-9 p-2 rounded-xl flex-shrink-0 bg-amber-500/10 text-amber-400 border border-amber-500/20 flex items-center justify-center">
+                              <CardIcon className="w-4.5 h-4.5 animate-pulse" />
+                            </div>
+                          ) : (
+                            <div className={`p-2.5 rounded-xl flex-shrink-0 ${isFolder ? 'bg-[#0095ff]/10 text-[#0095ff]' : formatDetails.bg}`}>
+                              <CardIcon className="w-4.5 h-4.5" />
+                            </div>
+                          )}
                           <div className="min-w-0">
                             <div className="flex items-center gap-1.5">
                               <p className="text-xs font-semibold text-white truncate group-hover:text-[#0095ff] transition-colors">

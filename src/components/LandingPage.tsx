@@ -95,7 +95,7 @@ export default function LandingPage({
             </svg>
           </div>
           <span className="font-display font-bold text-xl tracking-tight text-white">
-            Nebula<span className="bg-gradient-to-r from-[#0095ff] to-cyan-400 bg-clip-text text-transparent"> Drive</span>
+            Root<span className="bg-gradient-to-r from-[#0095ff] to-cyan-400 bg-clip-text text-transparent"> Haven</span>
           </span>
         </div>
 
@@ -135,7 +135,7 @@ export default function LandingPage({
 
         {/* Hero Description */}
         <p className="text-slate-400 text-base sm:text-lg max-w-2xl leading-relaxed mb-10">
-          Nebula Drive is a next-generation high-integrity binary storage platform. Inspect archive files remotely, stream movies and audios instantly, and navigate nested workspaces without local extraction.
+          Root Haven is a next-generation high-integrity binary storage platform. Inspect archive files remotely, stream movies and audios instantly, and navigate nested workspaces without local extraction.
         </p>
 
         {/* CTA Button */}
@@ -318,7 +318,7 @@ export default function LandingPage({
                 </svg>
               </div>
               <h2 className="text-2xl font-bold tracking-tight text-white mt-1">
-                {authMode === 'signin' ? 'Sign In to Nebula' : 'Create Account'}
+                {authMode === 'signin' ? 'Sign In to Root Haven' : 'Create Account'}
               </h2>
               <p className="text-slate-400 text-xs text-center">
                 Access your secure cloud decompression explorer
@@ -365,7 +365,7 @@ export default function LandingPage({
                     required
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
-                    placeholder="luke@nebula.com"
+                    placeholder="luke@roothaven.com"
                     className="w-full bg-[#0d1117]/80 border border-white/10 rounded-2xl py-3 pl-12 pr-4 text-sm focus:outline-none focus:border-[#0095ff] transition-all text-white placeholder-slate-600"
                   />
                 </div>
@@ -403,7 +403,7 @@ export default function LandingPage({
                 {authLoading ? (
                   <Loader2 className="w-5 h-5 animate-spin" />
                 ) : (
-                  <span>{authMode === 'signin' ? 'Sign In to Nebula' : 'Create Space Account'}</span>
+                  <span>{authMode === 'signin' ? 'Sign In to Root Haven' : 'Create Space Account'}</span>
                 )}
               </button>
             </form>

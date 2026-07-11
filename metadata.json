@@ -1,6 +1,6 @@
 {
-  "name": "Matrix Cloud Storage",
-  "description": "Unlimited binary storage using Matrix Client-Server API with high-speed chunking, built-in media streaming, and secure remote ZIP decompression.",
+  "name": "Root Haven",
+  "description": "Unlimited binary storage using Backblaze B2 with high-speed chunking, built-in media streaming, and secure remote ZIP decompression.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
