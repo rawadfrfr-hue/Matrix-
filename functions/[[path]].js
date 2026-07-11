@@ -1,14 +1,10 @@
 /**
- * Cloudflare Pages catch-all route for high-performance, zero-server-load B2 file storage backend.
+ * Cloudflare Backend Worker / Pages Function
+ * Fully compatible with BOTH Cloudflare Pages Functions (onRequest) AND Standalone Workers (export default fetch).
  * Location: /functions/[[path]].js
  */
 
-export async function onRequest(context) {
-  const { request, env } = context;
-  const url = new URL(request.url);
-  const path = url.pathname;
-  const method = request.method;
-
+async function handleRequest(request, env) {
   // Set up CORS headers
   const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
@@ -17,13 +13,19 @@ export async function onRequest(context) {
     'Access-Control-Max-Age': '86400',
   };
 
+  const method = request.method;
   if (method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
 
+  const url = new URL(request.url);
+  const path = url.pathname;
+
+  const safeEnv = env || {};
+
   // Parse Firebase environment settings (separate individual variables as requested)
-  const projectId = env.FIREBASE_PROJECT_ID || "zetta-cloud-79576";
-  let databaseUrl = env.FIREBASE_DATABASE_URL || `https://${projectId}-default-rtdb.firebaseio.com`;
+  const projectId = safeEnv.FIREBASE_PROJECT_ID || "zetta-cloud-79576";
+  let databaseUrl = safeEnv.FIREBASE_DATABASE_URL || `https://${projectId}-default-rtdb.firebaseio.com`;
   if (!databaseUrl.endsWith('/')) {
     databaseUrl += '/';
   }
@@ -31,18 +33,42 @@ export async function onRequest(context) {
   // Resolve accounts
   let b2Accounts = [];
   try {
-    const jsonStr = env.B2_ACCOUNTS_JSON;
+    const jsonStr = safeEnv.B2_ACCOUNTS_JSON;
     if (jsonStr) {
       b2Accounts = JSON.parse(jsonStr);
+    } else {
+      return new Response(JSON.stringify({ 
+        error: 'Cloudflare Configuration Error: B2_ACCOUNTS_JSON environment variable is missing or empty. Please set it in your Cloudflare dashboard.' 
+      }), {
+        status: 400,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
     }
   } catch (err) {
-    console.error("Failed to parse B2_ACCOUNTS_JSON:", err);
+    return new Response(JSON.stringify({ 
+      error: `Cloudflare Configuration Error: Failed to parse B2_ACCOUNTS_JSON: ${err.message}. Please verify the JSON string formatting.` 
+    }), {
+      status: 400,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+
+  if (!Array.isArray(b2Accounts) || b2Accounts.length === 0) {
+    return new Response(JSON.stringify({ 
+      error: 'Cloudflare Configuration Error: B2_ACCOUNTS_JSON parsed successfully but contains no account objects.' 
+    }), {
+      status: 400,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
   }
 
   try {
     // 1. GET FILES LIST
     if (path === '/api/files' && method === 'GET') {
       const rtdbRes = await fetch(`${databaseUrl}files.json`);
+      if (!rtdbRes.ok) {
+        throw new Error(`Firebase RTDB returned status ${rtdbRes.status} (${rtdbRes.statusText})`);
+      }
       const files = await rtdbRes.json() || {};
       
       const ownerEmail = url.searchParams.get('ownerEmail');
@@ -61,6 +87,9 @@ export async function onRequest(context) {
     if (path.startsWith('/api/file-metadata/') && method === 'GET') {
       const fileId = path.substring('/api/file-metadata/'.length);
       const rtdbRes = await fetch(`${databaseUrl}files/${fileId}.json`);
+      if (!rtdbRes.ok) {
+        throw new Error(`Firebase RTDB metadata fetch returned status ${rtdbRes.status}`);
+      }
       const file = await rtdbRes.json();
       if (!file) {
         return new Response(JSON.stringify({ error: 'File not found' }), {
@@ -85,15 +114,17 @@ export async function onRequest(context) {
         fileName = url.searchParams.get('fileName') || 'file';
       }
 
-      if (b2Accounts.length === 0) {
-        return new Response(JSON.stringify({ error: 'No B2 accounts configured' }), {
-          status: 500,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-        });
+      // Latency calculation & find fastest account
+      let fastestAcct;
+      try {
+        fastestAcct = await findFastestAccount(b2Accounts);
+      } catch (err) {
+        throw new Error(`Latency discovery routing failed: ${err.message}`);
       }
 
-      // Latency calculation & find fastest account
-      const fastestAcct = await findFastestAccount(b2Accounts);
+      if (!fastestAcct) {
+        throw new Error('No active Backblaze storage account could be selected.');
+      }
 
       // Authenticate with Backblaze B2 Native API
       const authData = await b2AuthorizeAccount(fastestAcct.keyId, fastestAcct.appKey);
@@ -134,6 +165,7 @@ export async function onRequest(context) {
       const metadata = {
         fileId,
         fileName,
+        originalName: fileName,
         fileSize: Number(fileSize),
         mimeType: mimeType || 'application/octet-stream',
         uploadDate: new Date().toISOString(),
@@ -156,7 +188,7 @@ export async function onRequest(context) {
       });
 
       if (!rtdbRes.ok) {
-        throw new Error(`Failed to write metadata to Firebase Realtime Database: ${rtdbRes.statusText}`);
+        throw new Error(`Firebase RTDB write metadata failed with status ${rtdbRes.statusText}`);
       }
 
       return new Response(JSON.stringify({
@@ -179,7 +211,7 @@ export async function onRequest(context) {
       });
 
       if (!rtdbRes.ok) {
-        throw new Error('Failed to update thumbnail in database');
+        throw new Error(`Firebase RTDB failed to write thumbnail status: ${rtdbRes.statusText}`);
       }
 
       return new Response(JSON.stringify({ success: true, message: 'Thumbnail updated successfully' }), {
@@ -216,7 +248,7 @@ export async function onRequest(context) {
       // Locate corresponding B2 account credentials
       const acct = b2Accounts.find(a => a.email === metadata.b2AccountEmail);
       if (!acct) {
-        return new Response(JSON.stringify({ error: 'Storage account credentials matching this file are not configured.' }), {
+        return new Response(JSON.stringify({ error: `Storage account ${metadata.b2AccountEmail} matching this file is not configured on Cloudflare.` }), {
           status: 500,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' }
         });
@@ -281,13 +313,13 @@ export async function onRequest(context) {
     }
 
     // Fallback: If no API routes matched, return 404
-    return new Response(JSON.stringify({ error: 'Endpoint not found' }), {
+    return new Response(JSON.stringify({ error: `Endpoint '${path}' not found on Cloudflare Worker` }), {
       status: 404,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
   } catch (err) {
     console.error("Worker handler error:", err);
-    return new Response(JSON.stringify({ error: err.message || 'Internal server error' }), {
+    return new Response(JSON.stringify({ error: `Cloudflare Worker Internal Error: ${err.message}` }), {
       status: 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
@@ -295,9 +327,13 @@ export async function onRequest(context) {
 }
 
 /**
- * Pings each account's endpoint with a low timeout to determine network latency.
+ * Pings each account's endpoint to determine network latency.
  */
 async function findFastestAccount(accounts) {
+  if (!accounts || accounts.length === 0) {
+    throw new Error("No B2 accounts provided in configuration.");
+  }
+
   const pingPromises = accounts.map(async (acct) => {
     let url = acct.endpoint || "https://api.backblazeb2.com";
     if (!url.startsWith('http://') && !url.startsWith('https://')) {
@@ -307,7 +343,8 @@ async function findFastestAccount(accounts) {
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 2000);
-      await fetch(url, { method: 'HEAD', signal: controller.signal, mode: 'no-cors' });
+      // NOTE: Removed mode: 'no-cors' which is browser-specific and causes crash on V8 workers!
+      await fetch(url, { method: 'HEAD', signal: controller.signal });
       clearTimeout(timeoutId);
       const latency = Date.now() - start;
       return { acct, latency };
@@ -315,7 +352,7 @@ async function findFastestAccount(accounts) {
       try {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 2000);
-        await fetch(url, { method: 'GET', signal: controller.signal, mode: 'no-cors' });
+        await fetch(url, { method: 'GET', signal: controller.signal });
         clearTimeout(timeoutId);
         const latency = Date.now() - start;
         return { acct, latency };
@@ -427,3 +464,19 @@ async function b2DeleteFileVersion(apiUrl, authorizationToken, fileName, fileId)
   }
   return await res.json();
 }
+
+// ---------------------------------------------------------
+// EXPORTS FOR DUAL COMPATIBILITY: Pages Functions & Standard Workers
+// ---------------------------------------------------------
+
+// Support 1: Cloudflare Pages Functions
+export async function onRequest(context) {
+  return handleRequest(context.request, context.env);
+}
+
+// Support 2: Standalone Cloudflare Workers
+export default {
+  async fetch(request, env, ctx) {
+    return handleRequest(request, env);
+  }
+};
