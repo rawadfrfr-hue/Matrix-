@@ -19,50 +19,49 @@ async function handleRequest(request, env) {
   }
 
   const url = new URL(request.url);
-  const path = url.pathname;
+  const path = url.pathname.replace(/\/$/, '');
 
-  const safeEnv = env || {};
-
-  // Parse Firebase environment settings (separate individual variables as requested)
-  const projectId = safeEnv.FIREBASE_PROJECT_ID || "zetta-cloud-79576";
-  let databaseUrl = safeEnv.FIREBASE_DATABASE_URL || `https://${projectId}-default-rtdb.firebaseio.com`;
-  if (!databaseUrl.endsWith('/')) {
-    databaseUrl += '/';
-  }
-
-  // Resolve accounts
-  let b2Accounts = [];
   try {
+    const safeEnv = env || {};
+
+    // Parse Firebase environment settings (separate individual variables as requested)
+    const projectId = safeEnv.FIREBASE_PROJECT_ID || "zetta-cloud-79576";
+    let databaseUrl = safeEnv.FIREBASE_DATABASE_URL || `https://${projectId}-default-rtdb.firebaseio.com`;
+    if (!databaseUrl.endsWith('/')) {
+      databaseUrl += '/';
+    }
+
+    // Resolve accounts
+    let b2Accounts = [];
     const jsonStr = safeEnv.B2_ACCOUNTS_JSON;
-    if (jsonStr) {
-      b2Accounts = JSON.parse(jsonStr);
-    } else {
+    if (!jsonStr) {
       return new Response(JSON.stringify({ 
-        error: 'Cloudflare Configuration Error: B2_ACCOUNTS_JSON environment variable is missing or empty. Please set it in your Cloudflare dashboard.' 
+        error: 'Cloudflare Configuration Error: B2_ACCOUNTS_JSON environment variable is missing or empty in your Cloudflare Settings.' 
       }), {
         status: 400,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
     }
-  } catch (err) {
-    return new Response(JSON.stringify({ 
-      error: `Cloudflare Configuration Error: Failed to parse B2_ACCOUNTS_JSON: ${err.message}. Please verify the JSON string formatting.` 
-    }), {
-      status: 400,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-    });
-  }
 
-  if (!Array.isArray(b2Accounts) || b2Accounts.length === 0) {
-    return new Response(JSON.stringify({ 
-      error: 'Cloudflare Configuration Error: B2_ACCOUNTS_JSON parsed successfully but contains no account objects.' 
-    }), {
-      status: 400,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-    });
-  }
+    try {
+      b2Accounts = JSON.parse(jsonStr);
+    } catch (err) {
+      return new Response(JSON.stringify({ 
+        error: `Cloudflare Configuration Error: Failed to parse B2_ACCOUNTS_JSON: ${err.message}. Please verify the JSON formatting.` 
+      }), {
+        status: 400,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
 
-  try {
+    if (!Array.isArray(b2Accounts) || b2Accounts.length === 0) {
+      return new Response(JSON.stringify({ 
+        error: 'Cloudflare Configuration Error: B2_ACCOUNTS_JSON parsed successfully but contains no account objects.' 
+      }), {
+        status: 400,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
     // 1. GET FILES LIST
     if (path === '/api/files' && method === 'GET') {
       const rtdbRes = await fetch(`${databaseUrl}files.json`);
@@ -145,6 +144,63 @@ async function handleRequest(request, env) {
       });
     }
 
+    // 3b. PROXY UPLOAD FALLBACK ROUTE
+    if (path === '/api/upload-proxy' && method === 'POST') {
+      const contentType = request.headers.get('Content-Type') || 'application/octet-stream';
+      const encodedFileName = request.headers.get('X-File-Name') || 'file';
+      const fileName = decodeURIComponent(encodedFileName);
+
+      // Latency calculation & find fastest account
+      let fastestAcct;
+      try {
+        fastestAcct = await findFastestAccount(b2Accounts);
+      } catch (err) {
+        throw new Error(`Latency discovery routing failed: ${err.message}`);
+      }
+
+      if (!fastestAcct) {
+        throw new Error('No active Backblaze storage account could be selected.');
+      }
+
+      // Authenticate with Backblaze B2 Native API
+      const authData = await b2AuthorizeAccount(fastestAcct.keyId, fastestAcct.appKey);
+      const bucketId = await b2ListBuckets(authData.apiUrl, authData.authorizationToken, authData.accountId, fastestAcct.bucket);
+      const uploadData = await b2GetUploadUrl(authData.apiUrl, authData.authorizationToken, bucketId);
+
+      // Generate a unique file name/ID to prevent collisions in the bucket
+      const uniqueKey = `${Date.now()}-${fileName}`;
+
+      // Forward request body directly to Backblaze B2
+      const fileBuffer = await request.arrayBuffer();
+
+      const b2UploadRes = await fetch(uploadData.uploadUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': uploadData.authorizationToken,
+          'X-Bz-File-Name': encodeURIComponent(uniqueKey),
+          'Content-Type': contentType,
+          'X-Bz-Content-Sha1': 'do_not_verify'
+        },
+        body: fileBuffer
+      });
+
+      if (!b2UploadRes.ok) {
+        const errText = await b2UploadRes.text();
+        throw new Error(`B2 Upload via worker failed: ${errText}`);
+      }
+
+      const b2Res = await b2UploadRes.json();
+
+      return new Response(JSON.stringify({
+        fileId: b2Res.fileId,
+        b2FileId: uniqueKey,
+        b2AccountEmail: fastestAcct.email,
+        b2BucketName: fastestAcct.bucket
+      }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+
     // 4. LOG COMPLETED UPLOAD METADATA
     if (path === '/api/upload-metadata' && method === 'POST') {
       const body = await request.json();
@@ -161,7 +217,7 @@ async function handleRequest(request, env) {
         thumbnailUrl
       } = body;
 
-      const fileId = crypto.randomUUID();
+      const fileId = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : (Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15));
       const metadata = {
         fileId,
         fileName,

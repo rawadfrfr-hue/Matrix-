@@ -485,6 +485,108 @@ export default function App() {
     setUploadProgress(0);
     setCurrentUploadingName(file.name);
 
+    // Common metadata registration helper
+    const completeMetadataRegistration = async (
+      b2NativeFileId: string,
+      b2FileId: string,
+      b2AccountEmail: string,
+      b2BucketName: string
+    ) => {
+      // Handle optional video thumbnail locally
+      const isVideo = file.type.startsWith('video/') || file.name.match(/\.(mp4|webm|mov|avi|mkv)$/i);
+      let localThumbnailUrl = null;
+      if (isVideo) {
+        try {
+          localThumbnailUrl = await generateVideoThumbnail(file);
+        } catch (thumbErr) {
+          console.warn('Failed to generate local video thumbnail:', thumbErr);
+        }
+      }
+
+      // Log completed upload metadata to Firebase via Cloudflare Worker
+      const logRes = await fetch('/api/upload-metadata', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fileName: file.name,
+          fileSize: file.size,
+          mimeType: file.type || 'application/octet-stream',
+          b2AccountEmail,
+          b2BucketName,
+          b2FileId,
+          b2NativeFileId,
+          parentId: currentFolderId || null,
+          ownerEmail: user ? user.email : 'anonymous',
+          thumbnailUrl: localThumbnailUrl
+        })
+      });
+
+      if (!logRes.ok) {
+        const errJson = await logRes.json().catch(() => ({}));
+        throw new Error(errJson.error || 'Failed to log upload metadata');
+      }
+
+      const { metadata } = await logRes.json();
+      const uploadedItem: StorageItem = {
+        id: metadata.fileId,
+        name: metadata.fileName,
+        type: 'file',
+        size: metadata.fileSize,
+        uploadDate: metadata.uploadDate,
+        parentId: metadata.parentId,
+        isTrashed: false,
+        fileId: metadata.fileId,
+        isStarred: false,
+        thumbnailUrl: metadata.thumbnailUrl || null
+      };
+
+      saveItems([...items, uploadedItem]);
+      setUploading(false);
+      setUploadProgress(0);
+      setCurrentUploadingName('');
+    };
+
+    // Fallback proxy upload function
+    const runProxyUploadFallback = async (originalErrorMsg: string) => {
+      console.warn(`Direct B2 Upload failed or was blocked by CORS. Attempting worker proxy upload fallback... Detail: ${originalErrorMsg}`);
+      try {
+        // Send raw file binary to the proxy endpoint
+        const proxyRes = await fetch('/api/upload-proxy', {
+          method: 'POST',
+          headers: {
+            'Content-Type': file.type || 'application/octet-stream',
+            'X-File-Name': encodeURIComponent(file.name)
+          },
+          body: file
+        });
+
+        if (!proxyRes.ok) {
+          let errMsg = '';
+          try {
+            const errJson = await proxyRes.json();
+            errMsg = errJson.error || errJson.message || '';
+          } catch (e) {
+            try {
+              const rawText = await proxyRes.text();
+              errMsg = rawText.slice(0, 150);
+            } catch (textErr) {}
+          }
+          throw new Error(errMsg || `Proxy upload failed with status ${proxyRes.status}`);
+        }
+
+        const { fileId, b2FileId, b2AccountEmail, b2BucketName } = await proxyRes.json();
+        
+        // Log metadata using the helper
+        await completeMetadataRegistration(fileId, b2FileId, b2AccountEmail, b2BucketName);
+
+      } catch (proxyErr: any) {
+        setUploading(false);
+        setUploadProgress(0);
+        setCurrentUploadingName('');
+        setAppError(`Direct B2 upload failed (likely due to missing CORS policy on your bucket) and backup proxy upload also failed: ${proxyErr.message}. Please configure CORS rules in Backblaze bucket settings.`);
+      }
+    };
+
     try {
       // 1. Get pre-signed upload params from Cloudflare Worker
       const getParamsRes = await fetch('/api/get-upload-url', {
@@ -494,8 +596,19 @@ export default function App() {
       });
 
       if (!getParamsRes.ok) {
-        const errJson = await getParamsRes.json().catch(() => ({}));
-        throw new Error(errJson.error || 'Failed to initialize upload session');
+        let errMsg = '';
+        try {
+          const errJson = await getParamsRes.json();
+          errMsg = errJson.error || errJson.message || '';
+        } catch (e) {
+          try {
+            const rawText = await getParamsRes.text();
+            errMsg = rawText.slice(0, 150);
+          } catch (textErr) {
+            errMsg = `HTTP Error ${getParamsRes.status}: ${getParamsRes.statusText}`;
+          }
+        }
+        throw new Error(errMsg || `Upload session initialization failed with status ${getParamsRes.status}`);
       }
 
       const { uploadUrl, uploadAuthToken, b2FileId, b2AccountEmail, b2BucketName } = await getParamsRes.json();
@@ -520,58 +633,7 @@ export default function App() {
             const b2Res = JSON.parse(xhr.responseText);
             const b2NativeFileId = b2Res.fileId; // The unique B2 native file ID
 
-            // Handle optional video thumbnail locally
-            const isVideo = file.type.startsWith('video/') || file.name.match(/\.(mp4|webm|mov|avi|mkv)$/i);
-            let localThumbnailUrl = null;
-            if (isVideo) {
-              try {
-                localThumbnailUrl = await generateVideoThumbnail(file);
-              } catch (thumbErr) {
-                console.warn('Failed to generate local video thumbnail:', thumbErr);
-              }
-            }
-
-            // 3. Log completed upload metadata to Firebase via Cloudflare Worker
-            const logRes = await fetch('/api/upload-metadata', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                fileName: file.name,
-                fileSize: file.size,
-                mimeType: file.type || 'application/octet-stream',
-                b2AccountEmail,
-                b2BucketName,
-                b2FileId,
-                b2NativeFileId,
-                parentId: currentFolderId || null,
-                ownerEmail: user ? user.email : 'anonymous',
-                thumbnailUrl: localThumbnailUrl
-              })
-            });
-
-            if (!logRes.ok) {
-              const errJson = await logRes.json().catch(() => ({}));
-              throw new Error(errJson.error || 'Failed to log upload metadata');
-            }
-
-            const { metadata } = await logRes.json();
-            const uploadedItem: StorageItem = {
-              id: metadata.fileId,
-              name: metadata.fileName,
-              type: 'file',
-              size: metadata.fileSize,
-              uploadDate: metadata.uploadDate,
-              parentId: metadata.parentId,
-              isTrashed: false,
-              fileId: metadata.fileId,
-              isStarred: false,
-              thumbnailUrl: metadata.thumbnailUrl || null
-            };
-
-            saveItems([...items, uploadedItem]);
-            setUploading(false);
-            setUploadProgress(0);
-            setCurrentUploadingName('');
+            await completeMetadataRegistration(b2NativeFileId, b2FileId, b2AccountEmail, b2BucketName);
           } catch (err: any) {
             setUploading(false);
             setUploadProgress(0);
@@ -579,33 +641,26 @@ export default function App() {
             setAppError(err.message || 'Upload succeeded but metadata storage failed.');
           }
         } else {
-          setUploading(false);
-          setUploadProgress(0);
-          setCurrentUploadingName('');
+          let b2Err = '';
           try {
             const res = JSON.parse(xhr.responseText);
-            setAppError(res.error || `Direct B2 upload failed with status ${xhr.status}`);
+            b2Err = res.error || res.message || `HTTP ${xhr.status}`;
           } catch {
-            setAppError(`Direct B2 upload failed with status ${xhr.status}`);
+            b2Err = `HTTP ${xhr.status}`;
           }
+          await runProxyUploadFallback(`B2 direct upload returned ${b2Err}`);
         }
       };
 
-      xhr.onerror = () => {
-        setUploading(false);
-        setUploadProgress(0);
-        setCurrentUploadingName('');
-        setAppError('Network error occurred during direct B2 upload.');
+      xhr.onerror = async () => {
+        await runProxyUploadFallback('CORS policy or browser network block on B2 endpoint');
       };
 
       // Send raw file binary directly to B2 (Zero server load)
       xhr.send(file);
 
     } catch (err: any) {
-      setUploading(false);
-      setUploadProgress(0);
-      setCurrentUploadingName('');
-      setAppError(err.message || 'Failed to start upload session');
+      await runProxyUploadFallback(err.message || 'Failed to initialize direct upload session');
     }
   };
 

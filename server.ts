@@ -384,6 +384,124 @@ async function startServer() {
     }
   });
 
+  // 1c. PROXY UPLOAD ROUTE (fallback for CORS issues)
+  app.post('/api/upload-proxy', express.raw({ type: '*/*', limit: '100mb' }), async (req, res) => {
+    try {
+      const contentType = req.headers['content-type'] || 'application/octet-stream';
+      const encodedFileName = (req.headers['x-file-name'] as string) || 'file';
+      const fileName = decodeURIComponent(encodedFileName);
+      const fileBuffer = req.body;
+
+      if (!fileBuffer || fileBuffer.length === 0) {
+        return res.status(400).json({ error: 'Empty file body' });
+      }
+
+      if (b2Accounts.length === 0) {
+        return res.status(500).json({ error: 'No B2 accounts configured' });
+      }
+
+      // Latency calculation: Select fastest account based on real-time ping
+      const pingPromises = b2Accounts.map(async (acct) => {
+        let url = acct.endpoint || "https://api.backblazeb2.com";
+        if (!url.startsWith('http://') && !url.startsWith('https://')) {
+          url = 'https://' + url;
+        }
+        const start = Date.now();
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 2000);
+          await fetch(url, { method: 'HEAD', signal: controller.signal });
+          clearTimeout(timeoutId);
+          return { acct, latency: Date.now() - start };
+        } catch {
+          try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 2000);
+            await fetch(url, { method: 'GET', signal: controller.signal });
+            clearTimeout(timeoutId);
+            return { acct, latency: Date.now() - start };
+          } catch {
+            return { acct, latency: 9999 };
+          }
+        }
+      });
+
+      const results = await Promise.all(pingPromises);
+      results.sort((a, b) => a.latency - b.latency);
+      const fastestAcct = results[0].acct;
+
+      // Authorize with B2 Native REST API
+      const credentials = Buffer.from(`${fastestAcct.keyId}:${fastestAcct.appKey}`).toString('base64');
+      const authRes = await fetch("https://api.backblazeb2.com/b2api/v2/b2_authorize_account", {
+        method: "GET",
+        headers: { "Authorization": `Basic ${credentials}` }
+      });
+      if (!authRes.ok) {
+        throw new Error(`B2 Authorize failed: ${await authRes.text()}`);
+      }
+      const authData: any = await authRes.json();
+
+      // Get bucket ID
+      const bucketRes = await fetch(`${authData.apiUrl}/b2api/v2/b2_list_buckets`, {
+        method: "POST",
+        headers: {
+          "Authorization": authData.authorizationToken,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ accountId: authData.accountId, bucketName: fastestAcct.bucket })
+      });
+      if (!bucketRes.ok) {
+        throw new Error(`B2 List Buckets failed: ${await bucketRes.text()}`);
+      }
+      const bucketData: any = await bucketRes.json();
+      const bucketId = bucketData.buckets[0].bucketId;
+
+      // Get upload URL
+      const uploadRes = await fetch(`${authData.apiUrl}/b2api/v2/b2_get_upload_url`, {
+        method: "POST",
+        headers: {
+          "Authorization": authData.authorizationToken,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ bucketId })
+      });
+      if (!uploadRes.ok) {
+        throw new Error(`B2 Get Upload URL failed: ${await uploadRes.text()}`);
+      }
+      const uploadData: any = await uploadRes.json();
+
+      const uniqueKey = `${Date.now()}-${fileName}`;
+
+      const b2UploadRes = await fetch(uploadData.uploadUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': uploadData.authorizationToken,
+          'X-Bz-File-Name': encodeURIComponent(uniqueKey),
+          'Content-Type': contentType,
+          'X-Bz-Content-Sha1': 'do_not_verify'
+        },
+        body: fileBuffer
+      });
+
+      if (!b2UploadRes.ok) {
+        const errText = await b2UploadRes.text();
+        throw new Error(`B2 Upload failed inside express proxy: ${errText}`);
+      }
+
+      const b2Res: any = await b2UploadRes.json();
+
+      res.json({
+        fileId: b2Res.fileId,
+        b2FileId: uniqueKey,
+        b2AccountEmail: fastestAcct.email,
+        b2BucketName: fastestAcct.bucket
+      });
+    } catch (error: any) {
+      console.error('upload-proxy error:', error);
+      res.status(500).json({ error: error.message || 'Failed to upload via proxy' });
+    }
+  });
+
   const storage = multer.memoryStorage();
   const upload = multer({ storage });
 
