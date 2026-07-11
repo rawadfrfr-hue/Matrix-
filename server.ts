@@ -3,13 +3,31 @@ import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import multer from 'multer';
-import axios from 'axios';
 import { initializeApp as initAdminApp, getApps as getAdminApps, cert as adminCert } from 'firebase-admin/app';
 import { getDatabase as getAdminDatabase } from 'firebase-admin/database';
 import { initializeApp as initClientApp } from 'firebase/app';
 import { getDatabase as getClientDatabase, ref as dbRef, set as dbSet, get as dbGet, remove as dbRemove } from 'firebase/database';
 import cors from 'cors';
 import { randomUUID } from 'crypto';
+import axios from 'axios';
+import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+
+// Interface for Backblaze B2 Account configured in process.env.B2_ACCOUNTS_JSON
+interface B2Account {
+  email: string;
+  bucket: string;
+  keyId: string;
+  appKey: string;
+  endpoint: string;
+  region: string;
+}
+
+let b2Accounts: B2Account[] = [];
+const usedSpaceMap: Record<string, number> = {}; // email -> bytes
+
+// Limit defined by user: 9.5 GB
+const FREE_TIER_LIMIT = 9.5 * 1024 * 1024 * 1024; 
 
 let dbClient: any = null;
 let discoveredDatabaseURL = "";
@@ -123,13 +141,82 @@ function getDb() {
   }
 }
 
-async function startServer() {
-  // Safe environment diagnostic logging (only logs variable names, never values)
-  const matrixKeys = Object.keys(process.env).filter(k => k.startsWith("MATRIX_"));
-  const firebaseKeys = Object.keys(process.env).filter(k => k.startsWith("FIREBASE_"));
-  console.log(`[Env Diagnostic] Detected Matrix keys in process.env:`, matrixKeys);
-  console.log(`[Env Diagnostic] Detected Firebase keys in process.env:`, firebaseKeys);
+function parseB2Accounts() {
+  const jsonStr = process.env.B2_ACCOUNTS_JSON;
+  if (!jsonStr) {
+    console.warn("[B2 Config] B2_ACCOUNTS_JSON environment variable is missing.");
+    return;
+  }
+  try {
+    b2Accounts = JSON.parse(jsonStr);
+    console.log(`[B2 Config] Loaded ${b2Accounts.length} Backblaze B2 accounts.`);
+    for (const acct of b2Accounts) {
+      usedSpaceMap[acct.email] = 0;
+    }
+  } catch (err: any) {
+    console.error("[B2 Config] Failed to parse B2_ACCOUNTS_JSON:", err.message);
+  }
+}
 
+async function initializeUsedSpace() {
+  try {
+    const db = getDb();
+    const snapshot = await db.ref('/files').once('value');
+    const files = snapshot.val() || {};
+
+    // Reset space map values to 0
+    for (const acct of b2Accounts) {
+      usedSpaceMap[acct.email] = 0;
+    }
+
+    Object.values(files).forEach((file: any) => {
+      if (file && file.b2AccountEmail && file.fileSize) {
+        if (usedSpaceMap[file.b2AccountEmail] !== undefined) {
+          usedSpaceMap[file.b2AccountEmail] += Number(file.fileSize);
+        } else {
+          usedSpaceMap[file.b2AccountEmail] = Number(file.fileSize);
+        }
+      }
+    });
+
+    console.log("[B2 Tracker] In-memory space utilization initialized:", usedSpaceMap);
+  } catch (err: any) {
+    console.error("[B2 Tracker] Failed to initialize space tracker:", err.message);
+  }
+}
+
+function selectB2Account(fileSize: number): B2Account {
+  if (b2Accounts.length === 0) {
+    throw new Error("No Backblaze B2 accounts configured in system settings.");
+  }
+
+  for (const acct of b2Accounts) {
+    const currentUsed = usedSpaceMap[acct.email] || 0;
+    if (currentUsed + fileSize <= FREE_TIER_LIMIT) {
+      return acct;
+    }
+  }
+
+  throw new Error("Free Tier Storage Limit Exceeded: No B2 account has enough remaining space (9.5 GB ceiling).");
+}
+
+function getS3Client(acct: B2Account): S3Client {
+  let endpoint = (acct.endpoint || '').trim();
+  if (endpoint && !endpoint.startsWith('http://') && !endpoint.startsWith('https://')) {
+    endpoint = 'https://' + endpoint;
+  }
+  return new S3Client({
+    endpoint,
+    region: acct.region,
+    forcePathStyle: true,
+    credentials: {
+      accessKeyId: acct.keyId,
+      secretAccessKey: acct.appKey
+    }
+  });
+}
+
+async function startServer() {
   const projectId = process.env.FIREBASE_PROJECT_ID || "zetta-cloud-79576";
   try {
     discoveredDatabaseURL = await discoverDatabaseUrl(projectId);
@@ -138,174 +225,108 @@ async function startServer() {
     console.warn('[Firebase Start] Failed to auto-discover database URL:', err);
   }
 
+  // Parse configuration and load B2 accounts
+  parseB2Accounts();
+
+  // Initialize Used Space Tracking from database on startup
+  try {
+    await initializeUsedSpace();
+  } catch (err: any) {
+    console.warn("[Firebase Start] Could not run initial space calculation on launch:", err.message);
+  }
+
   const app = express();
   app.use(cors());
   app.use(express.json());
 
   const storage = multer.memoryStorage();
   const upload = multer({ storage });
-  const CHUNK_SIZE = 40 * 1024 * 1024; // 40MB
 
-  // 4. Advanced Upload & File Splitting Logic
+  // 1. FILE UPLOAD ROUTE
   app.post('/api/upload', upload.single('file'), async (req, res) => {
     try {
       if (!req.file) {
         return res.status(400).json({ error: 'No file uploaded' });
       }
-      
-      const { MATRIX_HOMESERVER, MATRIX_ACCESS_TOKEN, MATRIX_ROOM_ID } = process.env;
-      if (!MATRIX_HOMESERVER || !MATRIX_ACCESS_TOKEN) {
-        const missing = [];
-        if (!MATRIX_HOMESERVER) missing.push('MATRIX_HOMESERVER');
-        if (!MATRIX_ACCESS_TOKEN) missing.push('MATRIX_ACCESS_TOKEN');
-        const detectedKeys = Object.keys(process.env).filter(k => k.startsWith('MATRIX_'));
-        const errStr = `Matrix credentials missing or empty in environment: ${missing.join(', ')}. Please verify that you added these under the 'Variables' tab in your Railway project, saved them, and redeployed the service. Detected Matrix keys: ${detectedKeys.length ? detectedKeys.join(', ') : 'None'}`;
-        console.error(`[Upload Error] ${errStr}`);
-        return res.status(500).json({ error: errStr });
+
+      const fileSize = req.file.size;
+
+      // Smart Load Balancer
+      let selectedAccount: B2Account;
+      try {
+        selectedAccount = selectB2Account(fileSize);
+      } catch (lbErr: any) {
+        console.error(`[Upload Load Balancer] Failed to select account: ${lbErr.message}`);
+        return res.status(507).json({ error: lbErr.message });
       }
 
-      const buffer = req.file.buffer;
-      const totalChunks = Math.ceil(buffer.length / CHUNK_SIZE);
-      const chunkUris: string[] = [];
+      console.log(`[Upload Load Balancer] Selected account ${selectedAccount.email} for file: ${req.file.originalname}`);
 
-      for (let i = 0; i < totalChunks; i++) {
-        const start = i * CHUNK_SIZE;
-        const end = Math.min(start + CHUNK_SIZE, buffer.length);
-        const chunk = buffer.slice(start, end);
-        
-        const filename = `${req.file.originalname}_part${i}`;
-        const uploadUrlV3 = `${MATRIX_HOMESERVER}/_matrix/media/v3/upload?filename=${encodeURIComponent(filename)}`;
-        const uploadUrlR0 = `${MATRIX_HOMESERVER}/_matrix/media/r0/upload?filename=${encodeURIComponent(filename)}`;
-        const uploadUrlV1 = `${MATRIX_HOMESERVER}/_matrix/client/v1/media/upload?filename=${encodeURIComponent(filename)}`;
-        
-        let response;
-        try {
-          console.log(`[Matrix Upload] Attempting standard media/v3 upload endpoint: ${uploadUrlV3}`);
-          response = await axios.post(uploadUrlV3, chunk, {
-            headers: {
-              'Authorization': `Bearer ${MATRIX_ACCESS_TOKEN}`,
-              'Content-Type': 'application/octet-stream'
-            },
-            maxBodyLength: Infinity,
-            maxContentLength: Infinity
-          });
-        } catch (v3Err: any) {
-          console.warn(`[Matrix Upload] media/v3 upload failed (Status: ${v3Err?.response?.status || v3Err.message}), trying legacy media/r0 fallback...`);
-          try {
-            response = await axios.post(uploadUrlR0, chunk, {
-              headers: {
-                'Authorization': `Bearer ${MATRIX_ACCESS_TOKEN}`,
-                'Content-Type': 'application/octet-stream'
-              },
-              maxBodyLength: Infinity,
-              maxContentLength: Infinity
-            });
-          } catch (r0Err: any) {
-            console.warn(`[Matrix Upload] media/r0 upload failed (Status: ${r0Err?.response?.status || r0Err.message}), trying client/v1 fallback...`);
-            response = await axios.post(uploadUrlV1, chunk, {
-              headers: {
-                'Authorization': `Bearer ${MATRIX_ACCESS_TOKEN}`,
-                'Content-Type': 'application/octet-stream'
-              },
-              maxBodyLength: Infinity,
-              maxContentLength: Infinity
-            });
-          }
-        }
-        
-        if (!response.data || !response.data.content_uri) {
-           throw new Error('Failed to get content_uri from Matrix');
-        }
-        const mxcUri = response.data.content_uri;
-        chunkUris.push(mxcUri);
+      // AWS SDK S3Client instantiation for B2
+      const s3 = getS3Client(selectedAccount);
 
-        // Clean up process.env.MATRIX_ROOM_ID
-        let cleanRoomId = (process.env.MATRIX_ROOM_ID || '').replace(/['"\s]/g, '').trim();
-        if (cleanRoomId && !cleanRoomId.startsWith('!')) {
-          cleanRoomId = '!' + cleanRoomId;
-        }
+      // Generate unique name to prevent collisions in the bucket
+      const uniqueKey = `${Date.now()}-${req.file.originalname}`;
 
-        if (cleanRoomId) {
-          const chunkName = filename;
-          const chunkSize = chunk.length;
-          const txnId = `${Date.now()}_${Math.random().toString(36).substring(7)}`;
-          const messageUrl = `${MATRIX_HOMESERVER}/_matrix/client/v3/rooms/${encodeURIComponent(cleanRoomId)}/send/m.room.message/${txnId}`;
-          
-          console.log(`[Matrix Room Send] Sending file chunk message to room ${cleanRoomId}: ${messageUrl}`);
-          try {
-            await axios.put(messageUrl, {
-              "msgtype": "m.file",
-              "body": chunkName,
-              "url": mxcUri,
-              "info": { 
-                "size": chunkSize, 
-                "mimetype": "application/octet-stream" 
-              }
-            }, {
-              headers: {
-                'Authorization': `Bearer ${MATRIX_ACCESS_TOKEN}`,
-                'Content-Type': 'application/json'
-              }
-            });
-            console.log(`[Matrix Room Send] Message sent successfully to room for chunk ${i}`);
-          } catch (msgErr: any) {
-            console.error(`[Matrix Room Send] Failed to send message to room (Status: ${msgErr?.response?.status || msgErr.message}):`, msgErr?.response?.data || msgErr);
-          }
-        }
-      }
+      // Upload to Backblaze B2
+      await s3.send(new PutObjectCommand({
+        Bucket: selectedAccount.bucket,
+        Key: uniqueKey,
+        Body: req.file.buffer,
+        ContentType: req.file.mimetype || 'application/octet-stream'
+      }));
 
+      console.log(`[Upload B2] Successfully uploaded ${uniqueKey} to bucket ${selectedAccount.bucket}`);
+
+      // Generate unique file ID and save metadata to Firebase Database
       const fileId = randomUUID();
       const metadata = {
         fileId,
         fileName: req.file.originalname,
-        totalChunks,
-        fileSize: buffer.length,
+        originalName: req.file.originalname,
+        mimeType: req.file.mimetype || 'application/octet-stream',
+        fileSize,
         uploadDate: new Date().toISOString(),
-        chunks: chunkUris,
-        parentId: req.body.parentId || null
+        b2AccountEmail: selectedAccount.email,
+        b2BucketName: selectedAccount.bucket,
+        b2FileId: uniqueKey,
+        parentId: req.body.parentId || null,
+        ownerEmail: req.body.ownerEmail || 'anonymous',
+        isTrashed: false,
+        isStarred: false
       };
 
       const db = getDb();
       await db.ref(`/files/${fileId}`).set(metadata);
 
-      res.json({ success: true, metadata });
+      // Update in-memory tracker
+      usedSpaceMap[selectedAccount.email] = (usedSpaceMap[selectedAccount.email] || 0) + fileSize;
+      console.log(`[B2 Tracker] Updated used space for ${selectedAccount.email} to ${usedSpaceMap[selectedAccount.email]} bytes`);
+
+      res.json({
+        success: true,
+        metadata: {
+          fileId,
+          fileName: metadata.fileName,
+          fileSize: metadata.fileSize,
+          uploadDate: metadata.uploadDate,
+          parentId: metadata.parentId
+        }
+      });
     } catch (error: any) {
-      console.error('Upload error:', error?.response?.data || error);
+      console.error('Upload error:', error);
       res.status(500).json({ error: error.message || 'Upload failed' });
     }
   });
 
-  app.get('/api/files', async (req, res) => {
-    try {
-      const db = getDb();
-      const snapshot = await db.ref('/files').once('value');
-      const files = snapshot.val() || {};
-      const filesList = Object.values(files).sort((a: any, b: any) => 
-        new Date(b.uploadDate).getTime() - new Date(a.uploadDate).getTime()
-      );
-      res.json(filesList);
-    } catch (error: any) {
-      res.status(500).json({ error: error.message || 'Failed to fetch files' });
-    }
-  });
-
-  app.delete('/api/delete/:fileId', async (req, res) => {
+  // 2. DOWNLOAD HANDLER (Presigned URL Redirection)
+  const handleDownload = async (req: express.Request, res: express.Response) => {
     try {
       const fileId = req.params.fileId;
-      console.log(`[DELETE File] Request received to delete file ${fileId}`);
-      const db = getDb();
-      await db.ref('files/' + fileId).remove();
-      res.json({ success: true, message: 'File deleted successfully from database' });
-    } catch (error: any) {
-      console.error('Delete error:', error);
-      res.status(500).json({ error: error.message || 'Failed to delete file' });
-    }
-  });
+      if (!fileId || fileId.startsWith('preset-') || /[.#$\[\]]/.test(fileId)) {
+        return res.status(404).json({ error: 'File not found' });
+      }
 
-  // 5. Advanced Streaming & Merging Logic
-  app.get('/api/download/:fileId', async (req, res) => {
-    try {
-      const fileId = req.params.fileId;
       const db = getDb();
       const snapshot = await db.ref(`/files/${fileId}`).once('value');
       const metadata = snapshot.val();
@@ -314,58 +335,126 @@ async function startServer() {
         return res.status(404).json({ error: 'File not found' });
       }
 
-      const { MATRIX_HOMESERVER, MATRIX_ACCESS_TOKEN } = process.env;
-      if (!MATRIX_HOMESERVER || !MATRIX_ACCESS_TOKEN) {
-        return res.status(500).json({ error: 'Matrix credentials missing.' });
+      // Locate corresponding B2 account credentials
+      const acct = b2Accounts.find(a => a.email === metadata.b2AccountEmail);
+      if (!acct) {
+        return res.status(500).json({ error: 'Storage account credentials matching this file are not configured.' });
       }
-      
-      res.setHeader('Content-Disposition', `attachment; filename="${metadata.fileName}"`);
-      res.setHeader('Content-Type', 'application/octet-stream');
-      res.setHeader('Content-Length', metadata.fileSize);
 
-      for (const mxcUri of metadata.chunks) {
-        const mxcUrl = mxcUri.replace('mxc://', ''); // becomes server.name/mediaId
-        const downloadUrlV1 = `${MATRIX_HOMESERVER}/_matrix/client/v1/media/download/${mxcUrl}`;
-        const downloadUrlV3 = `${MATRIX_HOMESERVER}/_matrix/media/v3/download/${mxcUrl}`;
-        
-        let response;
-        try {
-          console.log(`[Matrix Download] Attempting client/v1 endpoint: ${downloadUrlV1}`);
-          response = await axios({
-            method: 'get',
-            url: downloadUrlV1,
-            responseType: 'stream',
-            headers: {
-              'Authorization': `Bearer ${MATRIX_ACCESS_TOKEN}`
-            }
-          });
-        } catch (v1Err: any) {
-          console.warn(`[Matrix Download] client/v1 download failed (Status: ${v1Err?.response?.status || v1Err.message}), trying media/v3 fallback: ${downloadUrlV3}`);
-          response = await axios({
-            method: 'get',
-            url: downloadUrlV3,
-            responseType: 'stream',
-            headers: {
-              'Authorization': `Bearer ${MATRIX_ACCESS_TOKEN}`
-            }
-          });
-        }
-        
-        await new Promise((resolve, reject) => {
-          response.data.pipe(res, { end: false });
-          response.data.on('end', resolve);
-          response.data.on('error', reject);
-        });
-      }
-      
-      res.end();
+      // Instantiate S3 Client for the matching account
+      const s3 = getS3Client(acct);
+
+      // Generate GetObject command with proper content disposition
+      const command = new GetObjectCommand({
+        Bucket: acct.bucket,
+        Key: metadata.b2FileId,
+        ResponseContentDisposition: `attachment; filename="${encodeURIComponent(metadata.fileName)}"`
+      });
+
+      // Generate presigned URL valid for 1 hour (3600 seconds)
+      const presignedUrl = await getSignedUrl(s3, command, { expiresIn: 3600 });
+      console.log(`[Download B2] Generated presigned URL for ${metadata.fileName} using account: ${acct.email}`);
+
+      // Seamlessly hand off download stream to B2 (Redirect with zero-server-bandwidth)
+      res.redirect(presignedUrl);
     } catch (error: any) {
       console.error('Download error:', error);
-      if (!res.headersSent) {
-        res.status(500).json({ error: error.message || 'Download failed' });
-      } else {
-        res.end();
+      res.status(500).json({ error: error.message || 'Download failed' });
+    }
+  };
+
+  app.get('/api/download/:fileId', handleDownload);
+  app.get('/api/file/:fileId', handleDownload);
+
+  // 3. GET FILES ROUTE
+  app.get('/api/files', async (req, res) => {
+    try {
+      const db = getDb();
+      const snapshot = await db.ref('/files').once('value');
+      const files = snapshot.val() || {};
+      const ownerEmail = req.query.ownerEmail;
+      
+      let filesList = Object.values(files)
+        .filter((f: any) => f && f.fileId && (f.fileName || f.originalName));
+
+      if (ownerEmail) {
+        filesList = filesList.filter((f: any) => f.ownerEmail === ownerEmail);
       }
+
+      filesList.sort((a: any, b: any) => 
+        new Date(b.uploadDate).getTime() - new Date(a.uploadDate).getTime()
+      );
+      res.json(filesList);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to fetch files' });
+    }
+  });
+
+  // 4. GET METADATA ROUTE
+  app.get('/api/file-metadata/:fileId', async (req, res) => {
+    try {
+      const fileId = req.params.fileId;
+      if (!fileId || fileId.startsWith('preset-') || /[.#$\[\]]/.test(fileId)) {
+        return res.status(404).json({ error: 'File not found' });
+      }
+      const db = getDb();
+      const snapshot = await db.ref(`/files/${fileId}`).once('value');
+      const file = snapshot.val();
+      if (!file) {
+        return res.status(404).json({ error: 'File not found' });
+      }
+      res.json(file);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message || 'Failed to fetch file metadata' });
+    }
+  });
+
+  // 5. DELETE FILE ROUTE
+  app.delete('/api/delete/:fileId', async (req, res) => {
+    try {
+      const fileId = req.params.fileId;
+      console.log(`[DELETE File] Request received to delete file: ${fileId}`);
+      if (!fileId || fileId.startsWith('preset-') || /[.#$\[\]]/.test(fileId)) {
+        console.log(`[DELETE File] Bypassing deletion for local/invalid file ID: ${fileId}`);
+        return res.json({ success: true, message: 'Local or preset file removed successfully' });
+      }
+
+      const db = getDb();
+      const snapshot = await db.ref(`/files/${fileId}`).once('value');
+      const metadata = snapshot.val();
+
+      if (!metadata) {
+        return res.status(404).json({ error: 'File not found' });
+      }
+
+      // Locate corresponding B2 account credentials
+      const acct = b2Accounts.find(a => a.email === metadata.b2AccountEmail);
+      if (acct) {
+        try {
+          const s3 = getS3Client(acct);
+
+          await s3.send(new DeleteObjectCommand({
+            Bucket: acct.bucket,
+            Key: metadata.b2FileId
+          }));
+          console.log(`[DELETE B2] Successfully deleted key ${metadata.b2FileId} from bucket ${acct.bucket}`);
+        } catch (b2Err: any) {
+          console.warn(`[DELETE B2] Non-blocking warning: Failed to delete key from Backblaze: ${b2Err.message}`);
+        }
+      }
+
+      // Update in-memory space utilization tracker
+      if (metadata.b2AccountEmail && usedSpaceMap[metadata.b2AccountEmail] !== undefined) {
+        usedSpaceMap[metadata.b2AccountEmail] = Math.max(0, usedSpaceMap[metadata.b2AccountEmail] - Number(metadata.fileSize || 0));
+        console.log(`[B2 Tracker] Subtracted deleted space. Used: ${usedSpaceMap[metadata.b2AccountEmail]} bytes`);
+      }
+
+      // Remove from database
+      await db.ref(`/files/${fileId}`).remove();
+      res.json({ success: true, message: 'File deleted successfully from database and B2' });
+    } catch (error: any) {
+      console.error('Delete error:', error);
+      res.status(500).json({ error: error.message || 'Failed to delete file' });
     }
   });
 
