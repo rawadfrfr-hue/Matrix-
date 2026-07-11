@@ -9,7 +9,7 @@ async function handleRequest(request, env) {
   const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS, PATCH',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-File-Name',
     'Access-Control-Max-Age': '86400',
   };
 
@@ -145,7 +145,7 @@ async function handleRequest(request, env) {
     }
 
     // 3b. PROXY UPLOAD FALLBACK ROUTE
-    if (path === '/api/upload-proxy' && method === 'POST') {
+    if (path === '/api/upload-fallback' && method === 'POST') {
       const contentType = request.headers.get('Content-Type') || 'application/octet-stream';
       const encodedFileName = request.headers.get('X-File-Name') || 'file';
       const fileName = decodeURIComponent(encodedFileName);

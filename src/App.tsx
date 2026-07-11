@@ -551,7 +551,7 @@ export default function App() {
       console.warn(`Direct B2 Upload failed or was blocked by CORS. Attempting worker proxy upload fallback... Detail: ${originalErrorMsg}`);
       try {
         // Send raw file binary to the proxy endpoint
-        const proxyRes = await fetch('/api/upload-proxy', {
+        const proxyRes = await fetch('/api/upload-fallback', {
           method: 'POST',
           headers: {
             'Content-Type': file.type || 'application/octet-stream',

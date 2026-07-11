@@ -385,7 +385,7 @@ async function startServer() {
   });
 
   // 1c. PROXY UPLOAD ROUTE (fallback for CORS issues)
-  app.post('/api/upload-proxy', express.raw({ type: '*/*', limit: '100mb' }), async (req, res) => {
+  app.post('/api/upload-fallback', express.raw({ type: '*/*', limit: '100mb' }), async (req, res) => {
     try {
       const contentType = req.headers['content-type'] || 'application/octet-stream';
       const encodedFileName = (req.headers['x-file-name'] as string) || 'file';
