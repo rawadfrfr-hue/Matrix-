@@ -44,6 +44,32 @@ import Sidebar from './components/Sidebar';
 import SharedFilePage from './components/SharedFilePage';
 import { generateVideoThumbnail, generateVideoThumbnailFromUrl } from './utils/thumbnail';
 
+// Helper to parse routing paths
+const getTabFromPath = (pathname: string): { tab: ActiveTab; folderId: string | null } => {
+  const cleanPath = pathname.replace(/\/$/, ''); // strip trailing slash
+  
+  if (cleanPath.startsWith('/folder/')) {
+    const parts = cleanPath.split('/');
+    const folderId = parts[2] || null;
+    return { tab: 'files', folderId };
+  }
+  
+  if (cleanPath === '/recent') {
+    return { tab: 'recent', folderId: null };
+  }
+  if (cleanPath === '/starred') {
+    return { tab: 'starred', folderId: null };
+  }
+  if (cleanPath === '/trash') {
+    return { tab: 'trash', folderId: null };
+  }
+  if (cleanPath === '/account' || cleanPath === '/settings') {
+    return { tab: 'account', folderId: null };
+  }
+  
+  return { tab: 'files', folderId: null };
+};
+
 export default function App() {
   // Authentication State
   const [user, setUser] = useState<{ email: string; name: string } | null>(null);
@@ -51,8 +77,93 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(false);
 
   // Layout & Navigation State
-  const [activeTab, setActiveTab] = useState<ActiveTab>('files');
-  const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
+  const [isNavigatingLoader, setIsNavigatingLoader] = useState(false);
+
+  const [activeTab, setActiveTabState] = useState<ActiveTab>(() => {
+    // Check if it's shared link page first
+    const pathParts = window.location.pathname.split('/');
+    const idx = pathParts.findIndex(p => p === 'share' || p === 'shared');
+    if (idx !== -1 && pathParts[idx + 1]) {
+      return 'files';
+    }
+    
+    const { tab } = getTabFromPath(window.location.pathname);
+    return tab;
+  });
+
+  const [currentFolderId, setCurrentFolderIdState] = useState<string | null>(() => {
+    const { folderId } = getTabFromPath(window.location.pathname);
+    return folderId;
+  });
+
+  const setActiveTab = (tab: ActiveTab) => {
+    let path = '/';
+    if (tab === 'files') {
+      path = currentFolderId ? `/folder/${currentFolderId}` : '/';
+    } else if (tab === 'recent') {
+      path = '/recent';
+    } else if (tab === 'starred') {
+      path = '/starred';
+    } else if (tab === 'trash') {
+      path = '/trash';
+    } else if (tab === 'account') {
+      path = '/account';
+    }
+    
+    if (window.location.pathname !== path) {
+      window.history.pushState(null, '', path);
+    }
+    
+    // Simulate high-fidelity loading state to make navigation feel real ("প্রতিবার লোডিং ও হয়")
+    setIsNavigatingLoader(true);
+    setTimeout(() => {
+      setIsNavigatingLoader(false);
+    }, 300);
+
+    setActiveTabState(tab);
+  };
+
+  const setCurrentFolderId = (folderId: string | null) => {
+    let path = '/';
+    if (activeTab === 'files') {
+      path = folderId ? `/folder/${folderId}` : '/';
+    } else if (activeTab === 'recent') {
+      path = '/recent';
+    } else if (activeTab === 'starred') {
+      path = '/starred';
+    } else if (activeTab === 'trash') {
+      path = '/trash';
+    } else if (activeTab === 'account') {
+      path = '/account';
+    }
+    
+    if (window.location.pathname !== path) {
+      window.history.pushState(null, '', path);
+    }
+    
+    setIsNavigatingLoader(true);
+    setTimeout(() => {
+      setIsNavigatingLoader(false);
+    }, 300);
+
+    setCurrentFolderIdState(folderId);
+  };
+
+  // Sync state on browser forward/back operations (History routing)
+  useEffect(() => {
+    const handlePopState = () => {
+      const { tab, folderId } = getTabFromPath(window.location.pathname);
+      setIsNavigatingLoader(true);
+      setTimeout(() => {
+        setIsNavigatingLoader(false);
+      }, 300);
+      setActiveTabState(tab);
+      setCurrentFolderIdState(folderId);
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [activeTab, currentFolderId]);
   const [searchQuery, setSearchQuery] = useState('');
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
@@ -1079,8 +1190,33 @@ export default function App() {
             </div>
           )}
 
-          {/* Tab 1: Files Manager (Primary Explore Workspace) */}
-          {activeTab === 'files' && (
+          {isNavigatingLoader ? (
+            <div className="space-y-6 sm:space-y-8 animate-pulse">
+              {/* Header Skeleton */}
+              <div className="flex justify-between items-center border-b border-white/5 pb-4">
+                <div className="h-7 bg-slate-800/40 border border-white/5 rounded-xl w-48 sm:w-64" />
+                <div className="h-6 bg-slate-800/40 border border-white/5 rounded-xl w-20" />
+              </div>
+              
+              {/* Filter Buttons Skeleton */}
+              <div className="flex flex-wrap gap-2">
+                <div className="h-10 bg-slate-800/40 border border-white/5 rounded-xl w-24" />
+                <div className="h-10 bg-slate-800/40 border border-white/5 rounded-xl w-24" />
+                <div className="h-10 bg-slate-800/40 border border-white/5 rounded-xl w-24" />
+              </div>
+
+              {/* Bento Grid Skeleton */}
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                <div className="h-32 bg-slate-800/40 border border-white/5 rounded-3xl" />
+                <div className="h-32 bg-slate-800/40 border border-white/5 rounded-3xl" />
+                <div className="h-32 bg-slate-800/40 border border-white/5 rounded-3xl" />
+                <div className="h-32 bg-slate-800/40 border border-white/5 rounded-3xl" />
+              </div>
+            </div>
+          ) : (
+            <>
+              {/* Tab 1: Files Manager (Primary Explore Workspace) */}
+              {activeTab === 'files' && (
             <>
               {/* Toolbar Settings & Actions row */}
               <div className="flex flex-col md:flex-row gap-4 items-center justify-between">
@@ -1238,24 +1374,40 @@ export default function App() {
                         onDoubleClick={() => {
                           if (isFolder) setCurrentFolderId(item.id);
                         }}
-                        className={`bg-[#161b22]/80 border rounded-3xl p-5 flex flex-col justify-between aspect-square hover:shadow-xl hover:-translate-y-1 transition-all duration-300 group cursor-pointer relative select-none
-                          ${isFolder ? 'border-white/5 hover:border-[#0095ff]/30' : 'border-white/5 hover:border-slate-800'}`}
+                        className={`border rounded-3xl p-5 flex flex-col justify-between aspect-square hover:shadow-xl hover:-translate-y-1 transition-all duration-300 group cursor-pointer relative select-none
+                          ${activeMenuId === item.id ? 'z-30' : 'z-10'}
+                          ${item.thumbnailUrl
+                            ? 'bg-slate-950/40 border-white/10 hover:border-white/20'
+                            : isFolder
+                              ? 'bg-[#161b22]/80 border-white/5 hover:border-[#0095ff]/30'
+                              : 'bg-[#161b22]/80 border-white/5 hover:border-slate-800'
+                          }`}
                       >
-                        {/* Upper row: icon and three-dots */}
-                        <div className="flex items-start justify-between">
+                        {/* Full card background thumbnail with fade-in and zoom */}
+                        {item.thumbnailUrl && (
+                          <>
+                            <div className="absolute inset-0 bg-white/5 animate-pulse rounded-3xl z-0" />
+                            <img 
+                              src={item.thumbnailUrl} 
+                              alt={item.name}
+                              className="absolute inset-0 w-full h-full object-cover rounded-3xl z-0 transition-all duration-500 group-hover:scale-[1.04]"
+                              style={{ opacity: 0 }}
+                              onLoad={(e) => {
+                                e.currentTarget.style.opacity = '1';
+                              }}
+                              referrerPolicy="no-referrer"
+                            />
+                            {/* Rich dark gradient overlay for optimal readability of white text */}
+                            <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/40 to-black/20 rounded-3xl z-0" />
+                          </>
+                        )}
+
+                        {/* Upper row: icon/badge and three-dots */}
+                        <div className="flex items-start justify-between relative z-10">
                           {item.thumbnailUrl ? (
-                            <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-2xl overflow-hidden border border-white/10 bg-slate-900/40 flex items-center justify-center relative group-hover:scale-105 transition-transform duration-300 shadow-inner">
-                              <div className="absolute inset-0 bg-white/5 animate-pulse" />
-                              <img 
-                                src={item.thumbnailUrl} 
-                                alt={item.name}
-                                className="w-full h-full object-cover relative z-10 transition-opacity duration-500"
-                                style={{ opacity: 0 }}
-                                onLoad={(e) => {
-                                  e.currentTarget.style.opacity = '1';
-                                }}
-                                referrerPolicy="no-referrer"
-                              />
+                            /* Transparent compact badge for files with a full-bleed thumbnail */
+                            <div className="p-2.5 rounded-2xl transition-transform group-hover:scale-105 duration-300 bg-black/40 backdrop-blur-md border border-white/10 text-white/95 shadow-sm">
+                              <CardIcon className="w-4 h-4" />
                             </div>
                           ) : item.name?.match(/\.(mp3|wav|m4a|aac|ogg)$/i) ? (
                             <div 
@@ -1294,7 +1446,7 @@ export default function App() {
 
                             {/* Actions Dropdown context menu overlay */}
                             {activeMenuId === item.id && (
-                              <div className="absolute right-0 mt-2 w-48 bg-[#161b22] border border-white/10 rounded-2xl p-2 shadow-2xl z-30 divide-y divide-white/5">
+                              <div className="absolute right-0 mt-2 w-48 bg-[#181f2a] border border-white/15 rounded-2xl p-2 shadow-[0_15px_35px_rgba(0,0,0,0.6)] z-50 divide-y divide-white/5">
                                 <div className="py-1">
                                   <button
                                     onClick={(e) => { e.stopPropagation(); handleToggleStar(item.id); }}
@@ -1348,18 +1500,18 @@ export default function App() {
                         </div>
 
                         {/* Text and size statistics */}
-                        <div className="mt-6 text-left" onClick={() => { if (isFolder) { setCurrentFolderId(item.id); } else { setPreviewItem(item); } }}>
+                        <div className="mt-6 text-left relative z-10" onClick={() => { if (isFolder) { setCurrentFolderId(item.id); } else { setPreviewItem(item); } }}>
                           <p className="text-sm font-semibold text-white truncate group-hover:text-[#0095ff] transition-colors">
                             {item.name}
                           </p>
                           <div className="flex items-center gap-2 mt-2">
-                            <span className="text-[10px] font-mono text-slate-500 font-semibold uppercase">
+                            <span className={`text-[10px] font-mono font-semibold uppercase ${item.thumbnailUrl ? 'text-slate-300' : 'text-slate-500'}`}>
                               {isFolder ? 'Folder node' : 'File backup'}
                             </span>
                             {!isFolder && (
                               <>
-                                <span className="w-1 h-1 rounded-full bg-slate-700" />
-                                <span className="text-[10px] text-slate-400 font-medium">
+                                <span className={`w-1 h-1 rounded-full ${item.thumbnailUrl ? 'bg-slate-500' : 'bg-slate-700'}`} />
+                                <span className={`text-[10px] font-medium ${item.thumbnailUrl ? 'text-slate-200' : 'text-slate-400'}`}>
                                   {item.size > 1000000 ? `${(item.size/1000000).toFixed(1)} MB` : `${(item.size/1024).toFixed(0)} KB`}
                                 </span>
                               </>
@@ -1369,7 +1521,7 @@ export default function App() {
 
                         {/* Star marker indicator overlay */}
                         {item.isStarred && (
-                          <div className="absolute top-2.5 left-2.5">
+                          <div className="absolute top-2.5 left-2.5 z-10">
                             <Star className="w-3 h-3 text-yellow-400 fill-yellow-400 drop-shadow" />
                           </div>
                         )}
@@ -1389,7 +1541,7 @@ export default function App() {
                       <div
                         key={item.id}
                         onClick={() => { if (isFolder) { setCurrentFolderId(item.id); } else { setPreviewItem(item); } }}
-                        className="p-4 hover:bg-white/5 transition-all flex items-center justify-between gap-4 cursor-pointer group first:rounded-t-[22px] last:rounded-b-[22px]"
+                        className={`p-4 hover:bg-white/5 transition-all flex items-center justify-between gap-4 cursor-pointer group first:rounded-t-[22px] last:rounded-b-[22px] relative ${activeMenuId === item.id ? 'z-30' : 'z-10'}`}
                       >
                         <div className="flex items-center gap-4 min-w-0">
                           {item.thumbnailUrl ? (
@@ -1447,7 +1599,7 @@ export default function App() {
 
                             {/* Actions Dropdown context menu overlay */}
                             {activeMenuId === item.id && (
-                              <div className="absolute right-0 mt-2 w-48 bg-[#161b22] border border-white/10 rounded-2xl p-2 shadow-2xl z-30 divide-y divide-white/5 text-left">
+                              <div className="absolute right-0 mt-2 w-48 bg-[#181f2a] border border-white/15 rounded-2xl p-2 shadow-[0_15px_35px_rgba(0,0,0,0.6)] z-50 divide-y divide-white/5 text-left">
                                 <div className="py-1">
                                   <button
                                     onClick={(e) => { e.stopPropagation(); handleToggleStar(item.id); }}
@@ -1724,6 +1876,8 @@ export default function App() {
                 </div>
               </form>
             </div>
+          )}
+            </>
           )}
 
         </div>
