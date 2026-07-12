@@ -37,6 +37,7 @@ import {
 
 import { StorageItem, ActiveTab, ViewMode } from './types';
 import { motion, AnimatePresence } from 'motion/react';
+import axios from 'axios';
 import LandingPage from './components/LandingPage';
 import FilePreviewModal from './components/FilePreviewModal';
 import Sidebar from './components/Sidebar';
@@ -478,96 +479,100 @@ export default function App() {
     }
   };
 
-  // XML Multipart upload with real-time feedback
-  const handleUpload = (file: File) => {
+  // Direct Client-side Upload with Presigned URL
+  const handleUpload = async (file: File) => {
     setAppError('');
     setUploading(true);
     setUploadProgress(0);
     setCurrentUploadingName(file.name);
 
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/upload');
-    
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) {
-        setUploadProgress(Math.round((e.loaded / e.total) * 100));
-      }
-    };
+    try {
+      // 1. Get presigned URL
+      const { data: presignData } = await axios.post('/api/get-upload-url', {
+        fileName: file.name,
+        fileType: file.type || 'application/octet-stream',
+        fileSize: file.size
+      });
 
-    xhr.onload = () => {
-      setUploading(false);
-      setUploadProgress(0);
-      setCurrentUploadingName('');
-      if (xhr.status === 200) {
-        try {
-          const res = JSON.parse(xhr.responseText);
-          const uploadedItem: StorageItem = {
-            id: res.metadata.fileId,
-            name: res.metadata.fileName,
-            type: 'file',
-            size: res.metadata.fileSize,
-            uploadDate: res.metadata.uploadDate,
-            parentId: currentFolderId,
-            isTrashed: false,
-            fileId: res.metadata.fileId,
-            isStarred: false,
-            thumbnailUrl: res.metadata.thumbnailUrl || null
-          };
+      const { uploadUrl, uniqueKey, b2AccountEmail, b2BucketName } = presignData;
 
-          const isVideo = file.type.startsWith('video/') || file.name.match(/\.(mp4|webm|mov|avi|mkv)$/i);
-          if (isVideo) {
-            generateVideoThumbnail(file)
-              .then(async (base64Thumb) => {
-                uploadedItem.thumbnailUrl = base64Thumb;
-                saveItems([...items, uploadedItem]);
-
-                // Send to backend silently
-                try {
-                  await fetch(`/api/file/${res.metadata.fileId}/thumbnail`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ thumbnailUrl: base64Thumb })
-                  });
-                } catch (err) {
-                  console.warn('Failed to save generated video thumbnail to database:', err);
-                }
-              })
-              .catch((err) => {
-                console.warn('Failed to generate local video thumbnail, relying on background processor:', err);
-                saveItems([...items, uploadedItem]);
-              });
-          } else {
-            saveItems([...items, uploadedItem]);
+      // 2. Upload file directly to B2
+      await axios.put(uploadUrl, file, {
+        headers: {
+          'Content-Type': file.type || 'application/octet-stream'
+        },
+        onUploadProgress: (progressEvent) => {
+          if (progressEvent.total) {
+            const progress = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+            setUploadProgress(progress);
           }
-        } catch {
-          fetchBackendFiles();
         }
-      } else {
-        try {
-          const res = JSON.parse(xhr.responseText);
-          setAppError(res.error || 'Upload failed');
-        } catch {
-          setAppError('Upload failed with status ' + xhr.status);
-        }
-      }
-    };
+      });
 
-    xhr.onerror = () => {
+      // 3. Save metadata to backend
+      const { data: res } = await axios.post('/api/save-metadata', {
+        fileName: file.name,
+        fileType: file.type || 'application/octet-stream',
+        fileSize: file.size,
+        uniqueKey,
+        b2AccountEmail,
+        b2BucketName,
+        parentId: currentFolderId,
+        ownerEmail: user ? user.email : 'anonymous'
+      });
+
       setUploading(false);
       setUploadProgress(0);
       setCurrentUploadingName('');
-      setAppError('Network error occurred during upload.');
-    };
 
-    const formData = new FormData();
-    formData.append('file', file);
-    if (currentFolderId) {
-      formData.append('parentId', currentFolderId);
+      const uploadedItem: StorageItem = {
+        id: res.metadata.fileId,
+        name: res.metadata.fileName,
+        type: 'file',
+        size: res.metadata.fileSize,
+        uploadDate: res.metadata.uploadDate,
+        parentId: currentFolderId,
+        isTrashed: false,
+        fileId: res.metadata.fileId,
+        isStarred: false,
+        thumbnailUrl: res.metadata.thumbnailUrl || null
+      };
+
+      const isVideo = file.type.startsWith('video/') || file.name.match(/\.(mp4|webm|mov|avi|mkv)$/i);
+      if (isVideo) {
+        generateVideoThumbnail(file)
+          .then(async (base64Thumb) => {
+            uploadedItem.thumbnailUrl = base64Thumb;
+            saveItems([...items, uploadedItem]);
+
+            // Send to backend silently
+            try {
+              await fetch(`/api/file/${res.metadata.fileId}/thumbnail`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ thumbnailUrl: base64Thumb })
+              });
+            } catch (err) {
+              console.warn('Failed to save generated video thumbnail to database:', err);
+            }
+          })
+          .catch((err) => {
+            console.warn('Failed to generate local video thumbnail, relying on background processor:', err);
+            saveItems([...items, uploadedItem]);
+          });
+      } else {
+        saveItems([...items, uploadedItem]);
+      }
+    } catch (error: any) {
+      setUploading(false);
+      setUploadProgress(0);
+      setCurrentUploadingName('');
+      setAppError(
+        error.response?.data?.error || 
+        error.message || 
+        'Direct upload failed'
+      );
     }
-    if (user) {
-      formData.append('ownerEmail', user.email);
-    }
-    xhr.send(formData);
   };
 
   const downloadFile = (fileId: string) => {
