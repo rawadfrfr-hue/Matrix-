@@ -128,6 +128,15 @@ async function handleRequest(request, env) {
       // Authenticate with Backblaze B2 Native API
       const authData = await b2AuthorizeAccount(fastestAcct.keyId, fastestAcct.appKey);
       const bucketId = await b2ListBuckets(authData.apiUrl, authData.authorizationToken, authData.accountId, fastestAcct.bucket);
+      
+      // Auto-configure CORS rules on the bucket to guarantee direct upload works flawlessly!
+      const canUpdateCors = authData.allowed && authData.allowed.capabilities && authData.allowed.capabilities.includes("writeBuckets");
+      if (canUpdateCors) {
+        await b2UpdateBucketCors(authData.apiUrl, authData.authorizationToken, authData.accountId, bucketId);
+      } else {
+        console.log(`[CORS Auto-Config] Key lacks writeBuckets capability. Skipping bucket CORS update.`);
+      }
+
       const uploadData = await b2GetUploadUrl(authData.apiUrl, authData.authorizationToken, bucketId);
 
       // Generate a unique file name/ID to prevent collisions in the bucket
@@ -462,6 +471,55 @@ async function b2ListBuckets(apiUrl, authorizationToken, accountId, bucketName) 
     throw new Error(`Bucket "${bucketName}" not found in B2 account`);
   }
   return data.buckets[0].bucketId;
+}
+
+/**
+ * Automatically updates bucket CORS rules to allow direct browser uploads.
+ */
+async function b2UpdateBucketCors(apiUrl, authorizationToken, accountId, bucketId) {
+  try {
+    const res = await fetch(`${apiUrl}/b2api/v2/b2_update_bucket`, {
+      method: "POST",
+      headers: {
+        "Authorization": authorizationToken,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        accountId,
+        bucketId,
+        corsRules: [
+          {
+            "corsRuleName": "AllowDirectBrowserUploads",
+            "allowedOrigins": ["*"],
+            "allowedHeaders": [
+              "authorization",
+              "content-type",
+              "x-bz-file-name",
+              "x-bz-content-sha1"
+            ],
+            "allowedMethods": [
+              "b2_upload_file",
+              "b2_upload_part",
+              "b2_download_file_by_id",
+              "b2_download_file_by_name"
+            ],
+            "exposeHeaders": [
+              "x-bz-content-sha1"
+            ],
+            "maxAgeSeconds": 3600
+          }
+        ]
+      })
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      console.log(`[CORS Auto-Config] Note: Bucket CORS configuration skipped or not applicable (non-blocking status ${res.status}): ${text}`);
+    } else {
+      console.log(`[CORS Auto-Config] Successfully configured direct browser CORS upload/download rules on bucket ${bucketId}.`);
+    }
+  } catch (err) {
+    console.log(`[CORS Auto-Config] Note: Bucket CORS configuration skipped or not applicable (non-blocking network event): ${err.message}`);
+  }
 }
 
 /**

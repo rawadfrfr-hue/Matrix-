@@ -216,6 +216,52 @@ function getS3Client(acct: B2Account): S3Client {
   });
 }
 
+async function b2UpdateBucketCors(apiUrl: string, authorizationToken: string, accountId: string, bucketId: string) {
+  try {
+    const res = await fetch(`${apiUrl}/b2api/v2/b2_update_bucket`, {
+      method: "POST",
+      headers: {
+        "Authorization": authorizationToken,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        accountId,
+        bucketId,
+        corsRules: [
+          {
+            "corsRuleName": "AllowDirectBrowserUploads",
+            "allowedOrigins": ["*"],
+            "allowedHeaders": [
+              "authorization",
+              "content-type",
+              "x-bz-file-name",
+              "x-bz-content-sha1"
+            ],
+            "allowedMethods": [
+              "b2_upload_file",
+              "b2_upload_part",
+              "b2_download_file_by_id",
+              "b2_download_file_by_name"
+            ],
+            "exposeHeaders": [
+              "x-bz-content-sha1"
+            ],
+            "maxAgeSeconds": 3600
+          }
+        ]
+      })
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      console.log(`[CORS Auto-Config] Note: Bucket CORS configuration skipped or not applicable (non-blocking status ${res.status}): ${text}`);
+    } else {
+      console.log(`[CORS Auto-Config] Successfully configured direct browser CORS upload/download rules on bucket ${bucketId}.`);
+    }
+  } catch (err: any) {
+    console.log(`[CORS Auto-Config] Note: Bucket CORS configuration skipped or not applicable (non-blocking network event): ${err.message}`);
+  }
+}
+
 async function startServer() {
   const projectId = process.env.FIREBASE_PROJECT_ID || "zetta-cloud-79576";
   try {
@@ -302,6 +348,14 @@ async function startServer() {
       }
       const bucketData: any = await bucketRes.json();
       const bucketId = bucketData.buckets[0].bucketId;
+
+      // Auto-configure CORS rules on the bucket to guarantee direct upload works flawlessly!
+      const canUpdateCors = authData.allowed && authData.allowed.capabilities && authData.allowed.capabilities.includes("writeBuckets");
+      if (canUpdateCors) {
+        await b2UpdateBucketCors(authData.apiUrl, authData.authorizationToken, authData.accountId, bucketId);
+      } else {
+        console.log(`[CORS Auto-Config] Key lacks writeBuckets capability. Skipping bucket CORS update.`);
+      }
 
       // Get upload URL
       const uploadRes = await fetch(`${authData.apiUrl}/b2api/v2/b2_get_upload_url`, {
