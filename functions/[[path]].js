@@ -127,12 +127,13 @@ async function handleRequest(request, env) {
 
       // Authenticate with Backblaze B2 Native API
       const authData = await b2AuthorizeAccount(fastestAcct.keyId, fastestAcct.appKey);
-      const bucketId = await b2ListBuckets(authData.apiUrl, authData.authorizationToken, authData.accountId, fastestAcct.bucket);
+      const bucketInfo = await b2ListBuckets(authData.apiUrl, authData.authorizationToken, authData.accountId, fastestAcct.bucket);
+      const bucketId = bucketInfo.bucketId;
       
       // Auto-configure CORS rules on the bucket to guarantee direct upload works flawlessly!
       const canUpdateCors = authData.allowed && authData.allowed.capabilities && authData.allowed.capabilities.includes("writeBuckets");
       if (canUpdateCors) {
-        await b2UpdateBucketCors(authData.apiUrl, authData.authorizationToken, authData.accountId, bucketId);
+        await b2UpdateBucketCors(authData.apiUrl, authData.authorizationToken, authData.accountId, bucketId, bucketInfo.bucketType);
       } else {
         console.log(`[CORS Auto-Config] Key lacks writeBuckets capability. Skipping bucket CORS update.`);
       }
@@ -173,7 +174,8 @@ async function handleRequest(request, env) {
 
       // Authenticate with Backblaze B2 Native API
       const authData = await b2AuthorizeAccount(fastestAcct.keyId, fastestAcct.appKey);
-      const bucketId = await b2ListBuckets(authData.apiUrl, authData.authorizationToken, authData.accountId, fastestAcct.bucket);
+      const bucketInfo = await b2ListBuckets(authData.apiUrl, authData.authorizationToken, authData.accountId, fastestAcct.bucket);
+      const bucketId = bucketInfo.bucketId;
       const uploadData = await b2GetUploadUrl(authData.apiUrl, authData.authorizationToken, bucketId);
 
       // Generate a unique file name/ID to prevent collisions in the bucket
@@ -321,7 +323,8 @@ async function handleRequest(request, env) {
 
       // Authorize account to get token and URLs
       const authData = await b2AuthorizeAccount(acct.keyId, acct.appKey);
-      const bucketId = await b2ListBuckets(authData.apiUrl, authData.authorizationToken, authData.accountId, acct.bucket);
+      const bucketInfo = await b2ListBuckets(authData.apiUrl, authData.authorizationToken, authData.accountId, acct.bucket);
+      const bucketId = bucketInfo.bucketId;
       
       // Get download authorization token
       const downloadAuth = await b2GetDownloadAuthorization(authData.apiUrl, authData.authorizationToken, bucketId, metadata.b2FileId);
@@ -451,7 +454,7 @@ async function b2AuthorizeAccount(keyId, appKey) {
 }
 
 /**
- * Retrieves the bucketId for the specified bucketName.
+ * Retrieves the bucket info for the specified bucketName.
  */
 async function b2ListBuckets(apiUrl, authorizationToken, accountId, bucketName) {
   const res = await fetch(`${apiUrl}/b2api/v2/b2_list_buckets`, {
@@ -470,13 +473,13 @@ async function b2ListBuckets(apiUrl, authorizationToken, accountId, bucketName) 
   if (!data.buckets || data.buckets.length === 0) {
     throw new Error(`Bucket "${bucketName}" not found in B2 account`);
   }
-  return data.buckets[0].bucketId;
+  return data.buckets[0];
 }
 
 /**
  * Automatically updates bucket CORS rules to allow direct browser uploads.
  */
-async function b2UpdateBucketCors(apiUrl, authorizationToken, accountId, bucketId) {
+async function b2UpdateBucketCors(apiUrl, authorizationToken, accountId, bucketId, bucketType) {
   try {
     const res = await fetch(`${apiUrl}/b2api/v2/b2_update_bucket`, {
       method: "POST",
@@ -487,6 +490,7 @@ async function b2UpdateBucketCors(apiUrl, authorizationToken, accountId, bucketI
       body: JSON.stringify({
         accountId,
         bucketId,
+        bucketType,
         corsRules: [
           {
             "corsRuleName": "AllowDirectBrowserUploads",

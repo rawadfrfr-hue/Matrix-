@@ -216,7 +216,7 @@ function getS3Client(acct: B2Account): S3Client {
   });
 }
 
-async function b2UpdateBucketCors(apiUrl: string, authorizationToken: string, accountId: string, bucketId: string) {
+async function b2UpdateBucketCors(apiUrl: string, authorizationToken: string, accountId: string, bucketId: string, bucketType: string) {
   try {
     const res = await fetch(`${apiUrl}/b2api/v2/b2_update_bucket`, {
       method: "POST",
@@ -227,6 +227,7 @@ async function b2UpdateBucketCors(apiUrl: string, authorizationToken: string, ac
       body: JSON.stringify({
         accountId,
         bucketId,
+        bucketType,
         corsRules: [
           {
             "corsRuleName": "AllowDirectBrowserUploads",
@@ -347,12 +348,13 @@ async function startServer() {
         throw new Error(`B2 List Buckets failed: ${await bucketRes.text()}`);
       }
       const bucketData: any = await bucketRes.json();
-      const bucketId = bucketData.buckets[0].bucketId;
+      const bucketInfo = bucketData.buckets[0];
+      const bucketId = bucketInfo.bucketId;
 
       // Auto-configure CORS rules on the bucket to guarantee direct upload works flawlessly!
       const canUpdateCors = authData.allowed && authData.allowed.capabilities && authData.allowed.capabilities.includes("writeBuckets");
       if (canUpdateCors) {
-        await b2UpdateBucketCors(authData.apiUrl, authData.authorizationToken, authData.accountId, bucketId);
+        await b2UpdateBucketCors(authData.apiUrl, authData.authorizationToken, authData.accountId, bucketId, bucketInfo.bucketType);
       } else {
         console.log(`[CORS Auto-Config] Key lacks writeBuckets capability. Skipping bucket CORS update.`);
       }
