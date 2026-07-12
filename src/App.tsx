@@ -974,6 +974,17 @@ export default function App() {
     window.location.href = `/api/download/${fileId}`;
   };
 
+  const handleOpenFile = (item: StorageItem) => {
+    const isVideo = item.name.match(/\.(mp4|mov|mkv|avi|webm)$/i);
+    if (isVideo) {
+      const fileId = item.fileId || item.id;
+      setSharedFileId(fileId);
+      window.history.pushState({}, '', `/share/${fileId}`);
+    } else {
+      setPreviewItem(item);
+    }
+  };
+
   const triggerOpenShareModal = (item: StorageItem) => {
     setShareLinkItem(item);
     setCopiedShareLink(false);
@@ -1176,6 +1187,13 @@ export default function App() {
 
         {/* Dashboard Workspace */}
         <div className="flex-1 overflow-y-auto p-4 sm:p-10 space-y-6 sm:space-y-8 z-10 relative">
+          {/* Click outside backdrop for closing 3-dot menus */}
+          {activeMenuId && (
+            <div 
+              className="fixed inset-0 z-20 bg-transparent cursor-default" 
+              onClick={() => setActiveMenuId(null)}
+            />
+          )}
           
           {/* App-level alerts */}
           {appError && (
@@ -1320,10 +1338,11 @@ export default function App() {
                     const currentFolder = items.find(i => i.id === currentFolderId);
                     setCurrentFolderId(currentFolder ? currentFolder.parentId : null);
                   }}
-                  className="p-1.5 hover:bg-white/5 rounded-xl text-red-500 hover:text-red-400 transition-all duration-200 cursor-pointer active:scale-95"
+                  className="p-1.5 hover:bg-white/5 rounded-xl text-red-500 hover:text-red-400 transition-all duration-200 cursor-pointer active:scale-95 flex items-center gap-1.5 text-xs font-bold"
                   title="Go back"
                 >
-                  <CornerUpLeft className="w-5.5 h-5.5" />
+                  <CornerUpLeft className="w-4.5 h-4.5" />
+                  <span>Back</span>
                 </button>
               )}
 
@@ -1361,9 +1380,9 @@ export default function App() {
                   </div>
                 </div>
               ) : viewMode === 'grid' ? (
-                // 1. GRID LAYOUT (BENTO GRID STYLE) - 2 CARDS PER LINE
-                <div className="grid grid-cols-2 gap-4">
-                  {finalItemsToRender.map((item) => {
+                // 1. GRID LAYOUT (BENTO GRID STYLE) - RESPONSIVE CARDS PER LINE
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                  {finalItemsToRender.map((item, index) => {
                     const isFolder = item.type === 'folder';
                     const formatDetails = getFileFormatStyles(item.name);
                     const CardIcon = isFolder ? Folder : formatDetails.icon;
@@ -1443,64 +1462,72 @@ export default function App() {
                             >
                               <MoreVertical className="w-4.5 h-4.5" />
                             </button>
-
-                            {/* Actions Dropdown context menu overlay */}
-                            {activeMenuId === item.id && (
-                              <div className="absolute right-0 mt-2 w-48 bg-[#181f2a] border border-white/15 rounded-2xl p-2 shadow-[0_15px_35px_rgba(0,0,0,0.6)] z-50 divide-y divide-white/5">
-                                <div className="py-1">
-                                  <button
-                                    onClick={(e) => { e.stopPropagation(); handleToggleStar(item.id); }}
-                                    className="w-full flex items-center gap-2 px-3 py-2 text-left text-xs text-slate-300 hover:bg-white/5 rounded-xl hover:text-white"
-                                  >
-                                    <Star className={`w-3.5 h-3.5 ${item.isStarred ? 'fill-yellow-400 text-yellow-400' : 'text-slate-400'}`} />
-                                    <span>{item.isStarred ? 'Unstar Element' : 'Star Element'}</span>
-                                  </button>
-
-                                  {!isFolder && (
-                                    <button
-                                      onClick={(e) => { e.stopPropagation(); triggerOpenShareModal(item); }}
-                                      className="w-full flex items-center gap-2 px-3 py-2 text-left text-xs text-slate-300 hover:bg-white/5 rounded-xl hover:text-white"
-                                    >
-                                      <Share2 className="w-3.5 h-3.5 text-slate-400" />
-                                      <span>Create Share Link</span>
-                                    </button>
-                                  )}
-
-                                  <button
-                                    onClick={(e) => { e.stopPropagation(); setItemToMove(item); setIsMoveModalOpen(true); setActiveMenuId(null); }}
-                                    className="w-full flex items-center gap-2 px-3 py-2 text-left text-xs text-slate-300 hover:bg-white/5 rounded-xl hover:text-white"
-                                  >
-                                    <Move className="w-3.5 h-3.5 text-slate-400" />
-                                    <span>Move Location</span>
-                                  </button>
-                                </div>
-
-                                <div className="py-1 pt-1">
-                                  {!isFolder && item.fileId && (
-                                    <button
-                                      onClick={(e) => { e.stopPropagation(); downloadFile(item.fileId!); setActiveMenuId(null); }}
-                                      className="w-full flex items-center gap-2 px-3 py-2 text-left text-xs text-slate-300 hover:bg-white/5 rounded-xl hover:text-white"
-                                    >
-                                      <Download className="w-3.5 h-3.5 text-slate-400" />
-                                      <span>Download Original</span>
-                                    </button>
-                                  )}
-
-                                  <button
-                                    onClick={(e) => { e.stopPropagation(); handleTrashItem(item.id); }}
-                                    className="w-full flex items-center gap-2 px-3 py-2 text-left text-xs text-rose-400 hover:bg-rose-500/10 rounded-xl"
-                                  >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                    <span>Move to Trash</span>
-                                  </button>
-                                </div>
-                              </div>
-                            )}
                           </div>
                         </div>
 
+                        {/* Actions Dropdown context menu overlay - Positioned relative to the card container for perfect screen boundary safety */}
+                        {activeMenuId === item.id && (
+                          <div 
+                            className={`absolute top-14 w-48 border border-white/15 rounded-2xl p-2 shadow-[0_15px_35px_rgba(0,0,0,0.6)] z-50 divide-y divide-white/5 ${
+                              index % 2 === 0 
+                                ? 'left-5 md:left-auto md:right-5 origin-top-left md:origin-top-right' 
+                                : 'right-5 origin-top-right'
+                            }`}
+                            style={{ backgroundColor: '#181f2a', opacity: 1 }}
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <div className="py-1">
+                              <button
+                                onClick={(e) => { e.stopPropagation(); handleToggleStar(item.id); }}
+                                className="w-full flex items-center gap-2 px-3 py-2 text-left text-xs text-slate-300 hover:bg-white/5 rounded-xl hover:text-white"
+                              >
+                                <Star className={`w-3.5 h-3.5 ${item.isStarred ? 'fill-yellow-400 text-yellow-400' : 'text-slate-400'}`} />
+                                <span>{item.isStarred ? 'Unstar Element' : 'Star Element'}</span>
+                              </button>
+
+                              {!isFolder && (
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); triggerOpenShareModal(item); }}
+                                  className="w-full flex items-center gap-2 px-3 py-2 text-left text-xs text-slate-300 hover:bg-white/5 rounded-xl hover:text-white"
+                                >
+                                  <Share2 className="w-3.5 h-3.5 text-slate-400" />
+                                  <span>Create Share Link</span>
+                                </button>
+                              )}
+
+                              <button
+                                onClick={(e) => { e.stopPropagation(); setItemToMove(item); setIsMoveModalOpen(true); setActiveMenuId(null); }}
+                                className="w-full flex items-center gap-2 px-3 py-2 text-left text-xs text-slate-300 hover:bg-white/5 rounded-xl hover:text-white"
+                              >
+                                <Move className="w-3.5 h-3.5 text-slate-400" />
+                                <span>Move Location</span>
+                              </button>
+                            </div>
+
+                            <div className="py-1 pt-1">
+                              {!isFolder && item.fileId && (
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); downloadFile(item.fileId!); setActiveMenuId(null); }}
+                                  className="w-full flex items-center gap-2 px-3 py-2 text-left text-xs text-slate-300 hover:bg-white/5 rounded-xl hover:text-white"
+                                >
+                                  <Download className="w-3.5 h-3.5 text-slate-400" />
+                                  <span>Download Original</span>
+                                </button>
+                              )}
+
+                              <button
+                                onClick={(e) => { e.stopPropagation(); handleTrashItem(item.id); }}
+                                className="w-full flex items-center gap-2 px-3 py-2 text-left text-xs text-rose-400 hover:bg-rose-500/10 rounded-xl"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                                <span>Move to Trash</span>
+                              </button>
+                            </div>
+                          </div>
+                        )}
+
                         {/* Text and size statistics */}
-                        <div className="mt-6 text-left relative z-10" onClick={() => { if (isFolder) { setCurrentFolderId(item.id); } else { setPreviewItem(item); } }}>
+                        <div className="mt-6 text-left relative z-10" onClick={() => { if (isFolder) { setCurrentFolderId(item.id); } else { handleOpenFile(item); } }}>
                           <p className="text-sm font-semibold text-white truncate group-hover:text-[#0095ff] transition-colors">
                             {item.name}
                           </p>
@@ -1540,7 +1567,7 @@ export default function App() {
                     return (
                       <div
                         key={item.id}
-                        onClick={() => { if (isFolder) { setCurrentFolderId(item.id); } else { setPreviewItem(item); } }}
+                        onClick={() => { if (isFolder) { setCurrentFolderId(item.id); } else { handleOpenFile(item); } }}
                         className={`p-4 hover:bg-white/5 transition-all flex items-center justify-between gap-4 cursor-pointer group first:rounded-t-[22px] last:rounded-b-[22px] relative ${activeMenuId === item.id ? 'z-30' : 'z-10'}`}
                       >
                         <div className="flex items-center gap-4 min-w-0">
@@ -1599,7 +1626,10 @@ export default function App() {
 
                             {/* Actions Dropdown context menu overlay */}
                             {activeMenuId === item.id && (
-                              <div className="absolute right-0 mt-2 w-48 bg-[#181f2a] border border-white/15 rounded-2xl p-2 shadow-[0_15px_35px_rgba(0,0,0,0.6)] z-50 divide-y divide-white/5 text-left">
+                              <div 
+                                className="absolute right-0 mt-2 w-48 border border-white/15 rounded-2xl p-2 shadow-[0_15px_35px_rgba(0,0,0,0.6)] z-50 divide-y divide-white/5 text-left"
+                                style={{ backgroundColor: '#181f2a', opacity: 1 }}
+                              >
                                 <div className="py-1">
                                   <button
                                     onClick={(e) => { e.stopPropagation(); handleToggleStar(item.id); }}
@@ -1689,7 +1719,7 @@ export default function App() {
                     return (
                       <div
                         key={item.id}
-                        onClick={() => { if (!isFolder) setPreviewItem(item); }}
+                        onClick={() => { if (!isFolder) handleOpenFile(item); }}
                         className="p-4 hover:bg-white/5 transition-all flex items-center justify-between gap-4 cursor-pointer group"
                       >
                         <div className="flex items-center gap-4 min-w-0">
