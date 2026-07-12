@@ -10,7 +10,7 @@ import { getDatabase as getClientDatabase, ref as dbRef, set as dbSet, get as db
 import cors from 'cors';
 import { randomUUID } from 'crypto';
 import axios from 'axios';
-import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, CreateMultipartUploadCommand, UploadPartCommand, CompleteMultipartUploadCommand, AbortMultipartUploadCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 // Interface for Backblaze B2 Account configured in process.env.B2_ACCOUNTS_JSON
@@ -242,6 +242,193 @@ async function startServer() {
   const storage = multer.memoryStorage();
   const upload = multer({ storage });
 
+  // Multipart initiate route
+  app.post('/api/upload/multipart/initiate', async (req, res) => {
+    try {
+      const { fileName, fileSize, fileType } = req.body;
+      if (!fileName || fileSize == null) {
+        return res.status(400).json({ error: 'Missing file metadata' });
+      }
+
+      // Smart Load Balancer
+      let selectedAccount: B2Account;
+      try {
+        selectedAccount = selectB2Account(fileSize);
+      } catch (lbErr: any) {
+        console.error(`[Upload Load Balancer] Failed to select account: ${lbErr.message}`);
+        return res.status(507).json({ error: lbErr.message });
+      }
+
+      console.log(`[Multipart Initiate] Selected account ${selectedAccount.email} for file: ${fileName}`);
+
+      const s3 = getS3Client(selectedAccount);
+      const uniqueKey = `${Date.now()}-${fileName}`;
+      const contentType = fileType || 'application/octet-stream';
+
+      const command = new CreateMultipartUploadCommand({
+        Bucket: selectedAccount.bucket,
+        Key: uniqueKey,
+        ContentType: contentType
+      });
+
+      const response = await s3.send(command);
+      
+      res.json({
+        success: true,
+        uploadId: response.UploadId,
+        key: uniqueKey,
+        uploadDetails: {
+          b2AccountEmail: selectedAccount.email,
+          b2BucketName: selectedAccount.bucket,
+          b2FileId: uniqueKey,
+          fileName,
+          fileSize,
+          contentType
+        }
+      });
+    } catch (error: any) {
+      console.error('Multipart Initiate error:', error);
+      res.status(500).json({ error: error.message || 'Multipart initiate failed' });
+    }
+  });
+
+  // Multipart presign parts route
+  app.post('/api/upload/multipart/presign-parts', async (req, res) => {
+    try {
+      const { uploadId, key, b2AccountEmail, partNumbers } = req.body;
+      if (!uploadId || !key || !b2AccountEmail || !partNumbers || !Array.isArray(partNumbers)) {
+        return res.status(400).json({ error: 'Missing parameters' });
+      }
+
+      const selectedAccount = b2Accounts.find(a => a.email === b2AccountEmail);
+      if (!selectedAccount) {
+        return res.status(404).json({ error: 'B2 account not found' });
+      }
+
+      const s3 = getS3Client(selectedAccount);
+      const presignedUrls: Record<number, string> = {};
+
+      for (const partNumber of partNumbers) {
+        const command = new UploadPartCommand({
+          Bucket: selectedAccount.bucket,
+          Key: key,
+          UploadId: uploadId,
+          PartNumber: partNumber
+        });
+        const url = await getSignedUrl(s3, command, { expiresIn: 3600 });
+        presignedUrls[partNumber] = url;
+      }
+
+      res.json({
+        success: true,
+        presignedUrls
+      });
+    } catch (error: any) {
+      console.error('Multipart Presign Parts error:', error);
+      res.status(500).json({ error: error.message || 'Presign parts failed' });
+    }
+  });
+
+  // Multipart complete route
+  app.post('/api/upload/multipart/complete', async (req, res) => {
+    try {
+      const { uploadId, key, b2AccountEmail, parts, parentId, ownerEmail, uploadDetails } = req.body;
+      if (!uploadId || !key || !b2AccountEmail || !parts || !Array.isArray(parts)) {
+        return res.status(400).json({ error: 'Missing parameters' });
+      }
+
+      const selectedAccount = b2Accounts.find(a => a.email === b2AccountEmail);
+      if (!selectedAccount) {
+        return res.status(404).json({ error: 'B2 account not found' });
+      }
+
+      const s3 = getS3Client(selectedAccount);
+      const command = new CompleteMultipartUploadCommand({
+        Bucket: selectedAccount.bucket,
+        Key: key,
+        UploadId: uploadId,
+        MultipartUpload: {
+          Parts: parts.sort((a, b) => a.PartNumber - b.PartNumber)
+        }
+      });
+
+      await s3.send(command);
+      console.log(`[Multipart Complete] Successfully completed multipart upload ${key}`);
+
+      const fileId = randomUUID();
+      const isImage = (uploadDetails.contentType || '').startsWith('image/') || 
+                      uploadDetails.fileName.match(/\.(jpg|jpeg|png|webp|gif|svg)$/i);
+      const thumbnailUrl = isImage ? `/api/download/${fileId}` : null;
+
+      const metadata = {
+        fileId,
+        fileName: uploadDetails.fileName,
+        originalName: uploadDetails.fileName,
+        mimeType: uploadDetails.contentType,
+        fileSize: uploadDetails.fileSize,
+        uploadDate: new Date().toISOString(),
+        b2AccountEmail: uploadDetails.b2AccountEmail,
+        b2BucketName: uploadDetails.b2BucketName,
+        b2FileId: uploadDetails.b2FileId,
+        parentId: parentId || null,
+        ownerEmail: ownerEmail || 'anonymous',
+        isTrashed: false,
+        isStarred: false,
+        thumbnailUrl
+      };
+
+      const db = getDb();
+      await db.ref(`/files/${fileId}`).set(metadata);
+
+      usedSpaceMap[uploadDetails.b2AccountEmail] = (usedSpaceMap[uploadDetails.b2AccountEmail] || 0) + uploadDetails.fileSize;
+      console.log(`[B2 Tracker] Updated used space for ${uploadDetails.b2AccountEmail} to ${usedSpaceMap[uploadDetails.b2AccountEmail]} bytes`);
+
+      res.json({
+        success: true,
+        metadata: {
+          fileId,
+          fileName: uploadDetails.fileName,
+          fileSize: uploadDetails.fileSize,
+          uploadDate: metadata.uploadDate,
+          parentId,
+          thumbnailUrl
+        }
+      });
+    } catch (error: any) {
+      console.error('Multipart Complete error:', error);
+      res.status(500).json({ error: error.message || 'Multipart completion failed' });
+    }
+  });
+
+  // Multipart abort route
+  app.post('/api/upload/multipart/abort', async (req, res) => {
+    try {
+      const { uploadId, key, b2AccountEmail } = req.body;
+      if (!uploadId || !key || !b2AccountEmail) {
+        return res.status(400).json({ error: 'Missing parameters' });
+      }
+
+      const selectedAccount = b2Accounts.find(a => a.email === b2AccountEmail);
+      if (!selectedAccount) {
+        return res.status(404).json({ error: 'B2 account not found' });
+      }
+
+      const s3 = getS3Client(selectedAccount);
+      const command = new AbortMultipartUploadCommand({
+        Bucket: selectedAccount.bucket,
+        Key: key,
+        UploadId: uploadId
+      });
+
+      await s3.send(command);
+      console.log(`[Multipart Abort] Aborted multipart upload ${key}`);
+      res.json({ success: true });
+    } catch (error: any) {
+      console.warn('Multipart Abort error:', error);
+      res.status(500).json({ error: error.message || 'Multipart abort failed' });
+    }
+  });
+
   // 1a. PRESIGNED URL ROUTE
   app.post('/api/upload/presign', async (req, res) => {
     try {
@@ -443,6 +630,7 @@ async function startServer() {
   });
 
   // 4b. UPDATE THUMBNAIL ROUTE
+
   app.post('/api/file/:fileId/thumbnail', async (req, res) => {
     try {
       const fileId = req.params.fileId;

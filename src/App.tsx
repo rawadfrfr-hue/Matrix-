@@ -12,6 +12,7 @@ import {
   ChevronRight, 
   Search, 
   X, 
+  XCircle,
   Plus, 
   HardDrive, 
   Download, 
@@ -93,6 +94,8 @@ export default function App() {
   
   const fileInputRef = useRef<HTMLInputElement>(null);
   const processedThumbnailIds = useRef<Set<string>>(new Set());
+  const activeXhrsRef = useRef<XMLHttpRequest[]>([]);
+  const currentMultipartRef = useRef<{ uploadId?: string; key?: string; b2AccountEmail?: string } | null>(null);
 
   // FAB & New Text File States
   const [isFabOpen, setIsFabOpen] = useState(false);
@@ -478,6 +481,44 @@ export default function App() {
     }
   };
 
+  const handleCancelUpload = async () => {
+    console.log('[Upload Cancel] Initiated by user');
+    // Abort all active XHRs
+    if (activeXhrsRef.current.length > 0) {
+      activeXhrsRef.current.forEach(xhr => {
+        try {
+          xhr.abort();
+        } catch (e) {
+          console.warn('Error aborting XHR:', e);
+        }
+      });
+      activeXhrsRef.current = [];
+    }
+
+    // Clean up Backblaze B2 multipart upload if active
+    if (currentMultipartRef.current) {
+      const { uploadId, key, b2AccountEmail } = currentMultipartRef.current;
+      if (uploadId && key && b2AccountEmail) {
+        try {
+          await fetch('/api/upload/multipart/abort', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uploadId, key, b2AccountEmail })
+          });
+          console.log('[Upload Cancel] Aborted multipart upload on B2 successfully');
+        } catch (err) {
+          console.warn('[Upload Cancel] Failed to abort multipart upload on B2:', err);
+        }
+      }
+      currentMultipartRef.current = null;
+    }
+
+    // Reset upload states
+    setUploading(false);
+    setUploadProgress(0);
+    setCurrentUploadingName('');
+  };
+
   // XML Multipart upload with real-time feedback
   const handleUpload = async (file: File) => {
     setAppError('');
@@ -485,108 +526,332 @@ export default function App() {
     setUploadProgress(0);
     setCurrentUploadingName(file.name);
 
+    // Reset tracking refs
+    activeXhrsRef.current = [];
+    currentMultipartRef.current = null;
+
+    const CHUNK_SIZE = 5 * 1024 * 1024; // 5 MB chunks
+
     try {
-      // Step 1: Get Presigned URL
-      const presignRes = await fetch('/api/upload/presign', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          fileName: file.name,
-          fileSize: file.size,
-          fileType: file.type || 'application/octet-stream'
-        })
-      });
+      if (file.size <= CHUNK_SIZE) {
+        // --- SINGLE-PART UPLOAD (For files <= 5MB) ---
+        const presignRes = await fetch('/api/upload/presign', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            fileName: file.name,
+            fileSize: file.size,
+            fileType: file.type || 'application/octet-stream'
+          })
+        });
 
-      if (!presignRes.ok) {
-        const errData = await presignRes.json();
-        throw new Error(errData.error || 'Failed to get upload URL');
-      }
-
-      const presignData = await presignRes.json();
-      const { presignedUrl, uploadDetails } = presignData;
-
-      // Step 2: Upload File via XMLHttpRequest to track progress
-      const xhr = new XMLHttpRequest();
-      xhr.open('PUT', presignedUrl);
-      xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
-
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) {
-          setUploadProgress(Math.round((e.loaded / e.total) * 100));
+        if (!presignRes.ok) {
+          const errData = await presignRes.json();
+          throw new Error(errData.error || 'Failed to get upload URL');
         }
-      };
 
-      xhr.onload = async () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          // Step 3: Confirm Upload
-          try {
-            const confirmRes = await fetch('/api/upload/confirm', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                uploadDetails,
-                parentId: currentFolderId,
-                ownerEmail: user?.email || 'anonymous'
-              })
-            });
+        const presignData = await presignRes.json();
+        const { presignedUrl, uploadDetails } = presignData;
 
-            if (!confirmRes.ok) {
-              const errData = await confirmRes.json();
-              throw new Error(errData.error || 'Failed to confirm upload');
+        const xhr = new XMLHttpRequest();
+        activeXhrsRef.current.push(xhr);
+        xhr.open('PUT', presignedUrl);
+        xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+
+        let lastReportedPercentage = 0;
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) {
+            const currentPercentage = Math.round((e.loaded / e.total) * 100);
+            if (currentPercentage > lastReportedPercentage) {
+              lastReportedPercentage = currentPercentage;
+              setUploadProgress(currentPercentage);
             }
-
-            const resData = await confirmRes.json();
-            
-            // Re-fetch files to ensure UI is completely in sync with backend
-            fetchBackendFiles();
-
-            // Fire and forget thumbnail generation if needed
-            const isVideo = file.type.startsWith('video/') || file.name.match(/\.(mp4|webm|mov|avi|mkv)$/i);
-            if (isVideo) {
-              generateVideoThumbnail(file)
-                .then(async (base64Thumb) => {
-                  try {
-                    await fetch(`/api/file/${resData.metadata.fileId}/thumbnail`, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ thumbnailUrl: base64Thumb })
-                    });
-                    fetchBackendFiles(); // Refresh again after thumbnail update
-                  } catch (err) {
-                    console.warn('Failed to save generated video thumbnail to database:', err);
-                  }
-                })
-                .catch((err) => {
-                  console.warn('Failed to generate local video thumbnail:', err);
-                });
-            }
-
-            setUploading(false);
-            setUploadProgress(0);
-            setCurrentUploadingName('');
-          } catch (err: any) {
-            setUploading(false);
-            setUploadProgress(0);
-            setCurrentUploadingName('');
-            setAppError(`Confirmation failed: ${err.message}`);
           }
-        } else {
+        };
+
+        xhr.onload = async () => {
+          activeXhrsRef.current = activeXhrsRef.current.filter(x => x !== xhr);
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try {
+              const confirmRes = await fetch('/api/upload/confirm', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  uploadDetails,
+                  parentId: currentFolderId,
+                  ownerEmail: user?.email || 'anonymous'
+                })
+              });
+
+              if (!confirmRes.ok) {
+                const errData = await confirmRes.json();
+                throw new Error(errData.error || 'Failed to confirm upload');
+              }
+
+              const resData = await confirmRes.json();
+              fetchBackendFiles();
+
+              // Fire & forget thumbnail generation
+              const isVideo = file.type.startsWith('video/') || file.name.match(/\.(mp4|webm|mov|avi|mkv)$/i);
+              if (isVideo) {
+                generateVideoThumbnail(file)
+                  .then(async (base64Thumb) => {
+                    try {
+                      await fetch(`/api/file/${resData.metadata.fileId}/thumbnail`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ thumbnailUrl: base64Thumb })
+                      });
+                      fetchBackendFiles();
+                    } catch (err) {
+                      console.warn('Failed to save generated video thumbnail:', err);
+                    }
+                  })
+                  .catch((err) => {
+                    console.warn('Failed to generate video thumbnail:', err);
+                  });
+              }
+
+              setUploading(false);
+              setUploadProgress(0);
+              setCurrentUploadingName('');
+            } catch (err: any) {
+              setUploading(false);
+              setUploadProgress(0);
+              setCurrentUploadingName('');
+              setAppError(`Confirmation failed: ${err.message}`);
+            }
+          } else {
+            setUploading(false);
+            setUploadProgress(0);
+            setCurrentUploadingName('');
+            setAppError(`Upload failed with status ${xhr.status}`);
+          }
+        };
+
+        xhr.onabort = () => {
+          activeXhrsRef.current = activeXhrsRef.current.filter(x => x !== xhr);
+        };
+
+        xhr.onerror = () => {
+          activeXhrsRef.current = activeXhrsRef.current.filter(x => x !== xhr);
           setUploading(false);
           setUploadProgress(0);
           setCurrentUploadingName('');
-          setAppError(`Upload failed with status ${xhr.status}`);
+          setAppError('Network error occurred during upload.');
+        };
+
+        xhr.send(file);
+      } else {
+        // --- CHUNKED MULTIPART UPLOAD (For files > 5MB) ---
+        // Step 1: Initiate Multipart Upload
+        const initRes = await fetch('/api/upload/multipart/initiate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            fileName: file.name,
+            fileSize: file.size,
+            fileType: file.type || 'application/octet-stream'
+          })
+        });
+
+        if (!initRes.ok) {
+          const errData = await initRes.json();
+          throw new Error(errData.error || 'Failed to initiate multipart upload');
         }
-      };
 
-      xhr.onerror = () => {
-        setUploading(false);
-        setUploadProgress(0);
-        setCurrentUploadingName('');
-        setAppError('Network error occurred during upload.');
-      };
+        const { uploadId, key, uploadDetails } = await initRes.json();
 
-      xhr.send(file);
+        // Track multipart upload details in case of cancelation
+        currentMultipartRef.current = { uploadId, key, b2AccountEmail: uploadDetails.b2AccountEmail };
+
+        // Calculate chunk metadata
+        const numParts = Math.ceil(file.size / CHUNK_SIZE);
+        const partNumbers = Array.from({ length: numParts }, (_, i) => i + 1);
+
+        // Step 2: Get Presigned URLs for all parts
+        const presignPartsRes = await fetch('/api/upload/multipart/presign-parts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            uploadId,
+            key,
+            b2AccountEmail: uploadDetails.b2AccountEmail,
+            partNumbers
+          })
+        });
+
+        if (!presignPartsRes.ok) {
+          const errData = await presignPartsRes.json();
+          throw new Error(errData.error || 'Failed to generate part URLs');
+        }
+
+        const { presignedUrls } = await presignPartsRes.json();
+
+        // Step 3: Upload chunks concurrently
+        const uploadedParts: { PartNumber: number; ETag: string }[] = [];
+        const partProgresses = new Array(numParts).fill(0);
+        let lastReportedPercentage = 0;
+        const concurrency = 3;
+        const partsQueue = [...partNumbers];
+
+        const uploadWorker = async () => {
+          while (partsQueue.length > 0) {
+            // Stop worker if user cancelled
+            if (!currentMultipartRef.current) break;
+
+            const partNumber = partsQueue.shift();
+            if (partNumber === undefined) break;
+
+            const start = (partNumber - 1) * CHUNK_SIZE;
+            const end = Math.min(start + CHUNK_SIZE, file.size);
+            const chunk = file.slice(start, end);
+            const url = presignedUrls[partNumber];
+
+            await new Promise<void>((resolve, reject) => {
+              const xhr = new XMLHttpRequest();
+              activeXhrsRef.current.push(xhr);
+              xhr.open('PUT', url);
+
+              xhr.upload.onprogress = (e) => {
+                if (e.lengthComputable) {
+                  partProgresses[partNumber - 1] = e.loaded;
+                  const totalUploaded = partProgresses.reduce((sum, val) => sum + val, 0);
+                  const currentPercentage = Math.min(99, Math.round((totalUploaded / file.size) * 100));
+                  if (currentPercentage > lastReportedPercentage) {
+                    lastReportedPercentage = currentPercentage;
+                    setUploadProgress(currentPercentage);
+                  }
+                }
+              };
+
+              xhr.onload = () => {
+                activeXhrsRef.current = activeXhrsRef.current.filter(x => x !== xhr);
+                if (xhr.status >= 200 && xhr.status < 300) {
+                  const etag = xhr.getResponseHeader('ETag');
+                  uploadedParts.push({ PartNumber: partNumber, ETag: etag || '' });
+                  partProgresses[partNumber - 1] = chunk.size;
+                  const totalUploaded = partProgresses.reduce((sum, val) => sum + val, 0);
+                  const currentPercentage = Math.min(99, Math.round((totalUploaded / file.size) * 100));
+                  if (currentPercentage > lastReportedPercentage) {
+                    lastReportedPercentage = currentPercentage;
+                    setUploadProgress(currentPercentage);
+                  }
+                  resolve();
+                } else {
+                  reject(new Error(`Part ${partNumber} upload failed with status ${xhr.status}`));
+                }
+              };
+
+              xhr.onerror = () => {
+                activeXhrsRef.current = activeXhrsRef.current.filter(x => x !== xhr);
+                reject(new Error(`Part ${partNumber} network error`));
+              };
+
+              xhr.onabort = () => {
+                activeXhrsRef.current = activeXhrsRef.current.filter(x => x !== xhr);
+                reject(new Error('Upload canceled by user'));
+              };
+
+              xhr.send(chunk);
+            });
+          }
+        };
+
+        try {
+          // Launch parallel workers to upload parts concurrently
+          const workers = Array.from({ length: concurrency }, () => uploadWorker());
+          await Promise.all(workers);
+
+          // If the upload was cancelled, currentMultipartRef.current will be null
+          if (!currentMultipartRef.current) {
+            console.log('Upload process detected cancellation. Aborting remaining tasks.');
+            return;
+          }
+
+          // Step 4: Complete Multipart Upload
+          const completeRes = await fetch('/api/upload/multipart/complete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              uploadId,
+              key,
+              b2AccountEmail: uploadDetails.b2AccountEmail,
+              parts: uploadedParts,
+              parentId: currentFolderId,
+              ownerEmail: user?.email || 'anonymous',
+              uploadDetails
+            })
+          });
+
+          if (!completeRes.ok) {
+            const errData = await completeRes.json();
+            throw new Error(errData.error || 'Failed to complete multipart upload');
+          }
+
+          const resData = await completeRes.json();
+          fetchBackendFiles();
+
+          // Fire & forget video thumbnail generation
+          const isVideo = file.type.startsWith('video/') || file.name.match(/\.(mp4|webm|mov|avi|mkv)$/i);
+          if (isVideo) {
+            generateVideoThumbnail(file)
+              .then(async (base64Thumb) => {
+                try {
+                  await fetch(`/api/file/${resData.metadata.fileId}/thumbnail`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ thumbnailUrl: base64Thumb })
+                  });
+                  fetchBackendFiles();
+                } catch (err) {
+                  console.warn('Failed to save generated video thumbnail:', err);
+                }
+              })
+              .catch((err) => {
+                console.warn('Failed to generate video thumbnail:', err);
+              });
+          }
+
+          setUploadProgress(100);
+          setTimeout(() => {
+            setUploading(false);
+            setUploadProgress(0);
+            setCurrentUploadingName('');
+          }, 800);
+
+        } catch (uploadErr: any) {
+          // If already canceled, return quietly
+          if (uploadErr.message === 'Upload canceled by user' || !currentMultipartRef.current) {
+            console.log('Multipart upload was canceled. Stopping process.');
+            return;
+          }
+
+          // If any chunk upload fails, abort the multipart upload
+          console.error('Multipart upload error, aborting...', uploadErr);
+          try {
+            await fetch('/api/upload/multipart/abort', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                uploadId,
+                key,
+                b2AccountEmail: uploadDetails.b2AccountEmail
+              })
+            });
+          } catch (abortErr) {
+            console.warn('Failed to abort multipart upload:', abortErr);
+          }
+          throw uploadErr;
+        } finally {
+          currentMultipartRef.current = null;
+        }
+      }
     } catch (err: any) {
+      if (err.message === 'Upload canceled by user') {
+        console.log('Upload cancellation handled.');
+        return;
+      }
       setUploading(false);
       setUploadProgress(0);
       setCurrentUploadingName('');
@@ -841,17 +1106,17 @@ export default function App() {
                     animate={{ opacity: 1, y: 0, scale: 1 }}
                     exit={{ opacity: 0, y: -10, scale: 0.95 }}
                     transition={{ type: 'spring', damping: 20, stiffness: 150 }}
-                    className="relative bg-gradient-to-br from-[#161b22] to-[#1e2530] border border-white/10 p-5 rounded-3xl shadow-[0_12px_40px_rgba(0,0,0,0.5)] overflow-hidden flex flex-col gap-3 w-full"
+                    className="relative bg-gradient-to-br from-[#161b22] to-[#1e2530] border border-white/10 p-4 rounded-2xl shadow-[0_12px_40px_rgba(0,0,0,0.5)] overflow-hidden flex flex-col gap-2.5 w-full"
                   >
                     {/* Glowing background accent */}
                     <div className="absolute top-0 left-0 w-32 h-32 bg-[#0095ff]/5 rounded-full blur-2xl pointer-events-none" />
                     
-                    <div className="flex items-center gap-4 relative z-10">
+                    <div className="flex items-center gap-3.5 relative z-10">
                       {/* Animated Upload Icon Box */}
-                      <div className="relative w-12 h-12 bg-[#0095ff]/10 rounded-2xl flex items-center justify-center border border-[#0095ff]/20 overflow-hidden flex-shrink-0">
+                      <div className="relative w-10 h-10 bg-[#0095ff]/10 rounded-xl flex items-center justify-center border border-[#0095ff]/20 overflow-hidden flex-shrink-0">
                         {/* Pulse Ring */}
                         <motion.div 
-                          className="absolute inset-0 bg-[#0095ff]/10 rounded-2xl"
+                          className="absolute inset-0 bg-[#0095ff]/10 rounded-xl"
                           animate={{ scale: [1, 1.15, 1], opacity: [0.5, 0, 0.5] }}
                           transition={{ repeat: Infinity, duration: 2, ease: "easeInOut" }}
                         />
@@ -861,7 +1126,7 @@ export default function App() {
                           transition={{ repeat: Infinity, duration: 1.8, ease: "easeInOut" }}
                           className="text-[#0095ff]"
                         >
-                          <UploadCloud className="w-6 h-6" />
+                          <UploadCloud className="w-5 h-5" />
                         </motion.div>
                       </div>
 
@@ -869,20 +1134,30 @@ export default function App() {
                       <div className="flex-1 min-w-0">
                         <div className="flex items-baseline justify-between gap-2">
                           <span className="text-xs font-semibold text-slate-400 font-mono tracking-wide uppercase">
-                            Uploading your file...
+                            Uploading...
                           </span>
                           <span className="text-sm font-black text-[#0095ff] font-mono">
                             {uploadProgress}%
                           </span>
                         </div>
-                        <p className="text-sm font-semibold text-white truncate mt-0.5 max-w-[280px] sm:max-w-[400px]">
+                        <p className="text-xs font-semibold text-white truncate mt-0.5 max-w-[160px] sm:max-w-[300px]">
                           {currentUploadingName}
                         </p>
                       </div>
+
+                      {/* Red Cancel Button */}
+                      <button
+                        onClick={handleCancelUpload}
+                        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 text-red-400 hover:text-red-300 transition-all text-xs font-semibold cursor-pointer select-none flex-shrink-0"
+                        title="Cancel upload"
+                      >
+                        <XCircle className="w-3.5 h-3.5" />
+                        <span>Cancel</span>
+                      </button>
                     </div>
 
                     {/* Progress Bar Container */}
-                    <div className="relative w-full h-2 bg-slate-800/80 rounded-full overflow-hidden border border-white/5 p-[1px] z-10">
+                    <div className="relative w-full h-1.5 bg-slate-800/80 rounded-full overflow-hidden border border-white/5 p-[1px] z-10">
                       <motion.div 
                         className="h-full rounded-full bg-gradient-to-r from-[#0095ff] via-cyan-400 to-[#0095ff] shadow-[0_0_8px_rgba(0,149,255,0.6)]"
                         initial={{ width: '0%' }}
