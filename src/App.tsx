@@ -37,7 +37,6 @@ import {
 
 import { StorageItem, ActiveTab, ViewMode } from './types';
 import { motion, AnimatePresence } from 'motion/react';
-import axios from 'axios';
 import LandingPage from './components/LandingPage';
 import FilePreviewModal from './components/FilePreviewModal';
 import Sidebar from './components/Sidebar';
@@ -479,7 +478,7 @@ export default function App() {
     }
   };
 
-  // Direct Client-side Upload with Presigned URL
+  // XML Multipart upload with real-time feedback
   const handleUpload = async (file: File) => {
     setAppError('');
     setUploading(true);
@@ -487,91 +486,111 @@ export default function App() {
     setCurrentUploadingName(file.name);
 
     try {
-      // 1. Get presigned URL
-      const { data: presignData } = await axios.post('/api/get-upload-url', {
-        fileName: file.name,
-        fileType: file.type || 'application/octet-stream',
-        fileSize: file.size
+      // Step 1: Get Presigned URL
+      const presignRes = await fetch('/api/upload/presign', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fileName: file.name,
+          fileSize: file.size,
+          fileType: file.type || 'application/octet-stream'
+        })
       });
 
-      const { uploadUrl, uniqueKey, b2AccountEmail, b2BucketName } = presignData;
+      if (!presignRes.ok) {
+        const errData = await presignRes.json();
+        throw new Error(errData.error || 'Failed to get upload URL');
+      }
 
-      // 2. Upload file directly to B2
-      await axios.put(uploadUrl, file, {
-        headers: {
-          'Content-Type': file.type || 'application/octet-stream'
-        },
-        onUploadProgress: (progressEvent) => {
-          if (progressEvent.total) {
-            const progress = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-            setUploadProgress(progress);
-          }
+      const presignData = await presignRes.json();
+      const { presignedUrl, uploadDetails } = presignData;
+
+      // Step 2: Upload File via XMLHttpRequest to track progress
+      const xhr = new XMLHttpRequest();
+      xhr.open('PUT', presignedUrl);
+      xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          setUploadProgress(Math.round((e.loaded / e.total) * 100));
         }
-      });
-
-      // 3. Save metadata to backend
-      const { data: res } = await axios.post('/api/save-metadata', {
-        fileName: file.name,
-        fileType: file.type || 'application/octet-stream',
-        fileSize: file.size,
-        uniqueKey,
-        b2AccountEmail,
-        b2BucketName,
-        parentId: currentFolderId,
-        ownerEmail: user ? user.email : 'anonymous'
-      });
-
-      setUploading(false);
-      setUploadProgress(0);
-      setCurrentUploadingName('');
-
-      const uploadedItem: StorageItem = {
-        id: res.metadata.fileId,
-        name: res.metadata.fileName,
-        type: 'file',
-        size: res.metadata.fileSize,
-        uploadDate: res.metadata.uploadDate,
-        parentId: currentFolderId,
-        isTrashed: false,
-        fileId: res.metadata.fileId,
-        isStarred: false,
-        thumbnailUrl: res.metadata.thumbnailUrl || null
       };
 
-      const isVideo = file.type.startsWith('video/') || file.name.match(/\.(mp4|webm|mov|avi|mkv)$/i);
-      if (isVideo) {
-        generateVideoThumbnail(file)
-          .then(async (base64Thumb) => {
-            uploadedItem.thumbnailUrl = base64Thumb;
-            saveItems([...items, uploadedItem]);
+      xhr.onload = async () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          // Step 3: Confirm Upload
+          try {
+            const confirmRes = await fetch('/api/upload/confirm', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                uploadDetails,
+                parentId: currentFolderId,
+                ownerEmail: user?.email || 'anonymous'
+              })
+            });
 
-            // Send to backend silently
-            try {
-              await fetch(`/api/file/${res.metadata.fileId}/thumbnail`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ thumbnailUrl: base64Thumb })
-              });
-            } catch (err) {
-              console.warn('Failed to save generated video thumbnail to database:', err);
+            if (!confirmRes.ok) {
+              const errData = await confirmRes.json();
+              throw new Error(errData.error || 'Failed to confirm upload');
             }
-          })
-          .catch((err) => {
-            console.warn('Failed to generate local video thumbnail, relying on background processor:', err);
-            saveItems([...items, uploadedItem]);
-          });
-      } else {
-        saveItems([...items, uploadedItem]);
-      }
-    } catch (error: any) {
+
+            const resData = await confirmRes.json();
+            
+            // Re-fetch files to ensure UI is completely in sync with backend
+            fetchBackendFiles();
+
+            // Fire and forget thumbnail generation if needed
+            const isVideo = file.type.startsWith('video/') || file.name.match(/\.(mp4|webm|mov|avi|mkv)$/i);
+            if (isVideo) {
+              generateVideoThumbnail(file)
+                .then(async (base64Thumb) => {
+                  try {
+                    await fetch(`/api/file/${resData.metadata.fileId}/thumbnail`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ thumbnailUrl: base64Thumb })
+                    });
+                    fetchBackendFiles(); // Refresh again after thumbnail update
+                  } catch (err) {
+                    console.warn('Failed to save generated video thumbnail to database:', err);
+                  }
+                })
+                .catch((err) => {
+                  console.warn('Failed to generate local video thumbnail:', err);
+                });
+            }
+
+            setUploading(false);
+            setUploadProgress(0);
+            setCurrentUploadingName('');
+          } catch (err: any) {
+            setUploading(false);
+            setUploadProgress(0);
+            setCurrentUploadingName('');
+            setAppError(`Confirmation failed: ${err.message}`);
+          }
+        } else {
+          setUploading(false);
+          setUploadProgress(0);
+          setCurrentUploadingName('');
+          setAppError(`Upload failed with status ${xhr.status}`);
+        }
+      };
+
+      xhr.onerror = () => {
+        setUploading(false);
+        setUploadProgress(0);
+        setCurrentUploadingName('');
+        setAppError('Network error occurred during upload.');
+      };
+
+      xhr.send(file);
+    } catch (err: any) {
       setUploading(false);
       setUploadProgress(0);
       setCurrentUploadingName('');
-      setAppError(
-        error.response?.data?.error || 
-        error.message || 
-        'Direct upload failed'
-      );
+      setAppError(err.message || 'Upload process failed');
     }
   };
 

@@ -242,13 +242,12 @@ async function startServer() {
   const storage = multer.memoryStorage();
   const upload = multer({ storage });
 
-  // 1a. GET PRESIGNED UPLOAD URL
-  app.post('/api/get-upload-url', async (req, res) => {
+  // 1a. PRESIGNED URL ROUTE
+  app.post('/api/upload/presign', async (req, res) => {
     try {
-      const { fileName, fileType, fileSize } = req.body;
-      
-      if (!fileName || !fileSize) {
-        return res.status(400).json({ error: 'Missing fileName or fileSize' });
+      const { fileName, fileSize, fileType } = req.body;
+      if (!fileName || fileSize == null) {
+        return res.status(400).json({ error: 'Missing file metadata' });
       }
 
       // Smart Load Balancer
@@ -267,62 +266,60 @@ async function startServer() {
 
       // Generate unique name to prevent collisions in the bucket
       const uniqueKey = `${Date.now()}-${fileName}`;
+      const contentType = fileType || 'application/octet-stream';
 
       const command = new PutObjectCommand({
         Bucket: selectedAccount.bucket,
         Key: uniqueKey,
-        ContentType: fileType || 'application/octet-stream'
+        ContentType: contentType
       });
 
-      // Generate presigned URL for PUT request
-      const uploadUrl = await getSignedUrl(s3, command, { expiresIn: 3600 });
-
+      // Generate presigned URL valid for 1 hour (3600 seconds)
+      const presignedUrl = await getSignedUrl(s3, command, { expiresIn: 3600 });
+      
       res.json({
-        uploadUrl,
-        uniqueKey,
-        b2AccountEmail: selectedAccount.email,
-        b2BucketName: selectedAccount.bucket
+        success: true,
+        presignedUrl,
+        uploadDetails: {
+          b2AccountEmail: selectedAccount.email,
+          b2BucketName: selectedAccount.bucket,
+          b2FileId: uniqueKey,
+          fileName,
+          fileSize,
+          contentType
+        }
       });
     } catch (error: any) {
-      console.error('Presigned URL error:', error);
-      res.status(500).json({ error: error.message || 'Failed to generate upload URL' });
+      console.error('Presign error:', error);
+      res.status(500).json({ error: error.message || 'Presign failed' });
     }
   });
 
-  // 1b. SAVE FILE METADATA AFTER UPLOAD
-  app.post('/api/save-metadata', async (req, res) => {
+  // 1b. CONFIRM UPLOAD ROUTE
+  app.post('/api/upload/confirm', async (req, res) => {
     try {
-      const { 
-        fileName, 
-        fileType, 
-        fileSize, 
-        uniqueKey, 
-        b2AccountEmail, 
-        b2BucketName, 
-        parentId, 
-        ownerEmail 
-      } = req.body;
+      const { uploadDetails, parentId, ownerEmail } = req.body;
 
-      if (!fileName || !uniqueKey || !b2AccountEmail) {
-        return res.status(400).json({ error: 'Missing required metadata fields' });
+      if (!uploadDetails || !uploadDetails.b2FileId) {
+        return res.status(400).json({ error: 'Missing upload details' });
       }
 
       // Generate unique file ID and save metadata to Firebase Database
       const fileId = randomUUID();
-      const isImage = (fileType || '').startsWith('image/') || 
-                      fileName.match(/\.(jpg|jpeg|png|webp|gif|svg)$/i);
+      const isImage = (uploadDetails.contentType || '').startsWith('image/') || 
+                      uploadDetails.fileName.match(/\.(jpg|jpeg|png|webp|gif|svg)$/i);
       const thumbnailUrl = isImage ? `/api/download/${fileId}` : null;
 
       const metadata = {
         fileId,
-        fileName,
-        originalName: fileName,
-        mimeType: fileType || 'application/octet-stream',
-        fileSize,
+        fileName: uploadDetails.fileName,
+        originalName: uploadDetails.fileName,
+        mimeType: uploadDetails.contentType,
+        fileSize: uploadDetails.fileSize,
         uploadDate: new Date().toISOString(),
-        b2AccountEmail,
-        b2BucketName,
-        b2FileId: uniqueKey,
+        b2AccountEmail: uploadDetails.b2AccountEmail,
+        b2BucketName: uploadDetails.b2BucketName,
+        b2FileId: uploadDetails.b2FileId,
         parentId: parentId || null,
         ownerEmail: ownerEmail || 'anonymous',
         isTrashed: false,
@@ -334,8 +331,8 @@ async function startServer() {
       await db.ref(`/files/${fileId}`).set(metadata);
 
       // Update in-memory tracker
-      usedSpaceMap[b2AccountEmail] = (usedSpaceMap[b2AccountEmail] || 0) + fileSize;
-      console.log(`[B2 Tracker] Updated used space for ${b2AccountEmail} to ${usedSpaceMap[b2AccountEmail]} bytes`);
+      usedSpaceMap[uploadDetails.b2AccountEmail] = (usedSpaceMap[uploadDetails.b2AccountEmail] || 0) + uploadDetails.fileSize;
+      console.log(`[B2 Tracker] Updated used space for ${uploadDetails.b2AccountEmail} to ${usedSpaceMap[uploadDetails.b2AccountEmail]} bytes`);
 
       res.json({
         success: true,
@@ -350,8 +347,8 @@ async function startServer() {
         }
       });
     } catch (error: any) {
-      console.error('Metadata save error:', error);
-      res.status(500).json({ error: error.message || 'Failed to save metadata' });
+      console.error('Confirm error:', error);
+      res.status(500).json({ error: error.message || 'Confirm failed' });
     }
   });
 
