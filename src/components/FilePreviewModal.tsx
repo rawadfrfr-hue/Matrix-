@@ -52,7 +52,11 @@ export default function FilePreviewModal({
   const [duration, setDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
+  const [bufferedEnd, setBufferedEnd] = useState(0);
+  const [isDraggingSeek, setIsDraggingSeek] = useState(false);
   const mediaRef = useRef<HTMLVideoElement | HTMLAudioElement | null>(null);
+  const videoProgressBarRef = useRef<HTMLDivElement>(null);
+  const audioProgressBarRef = useRef<HTMLDivElement>(null);
 
   // Advanced video player states & refs (Fullscreen, Rotation, Swipe Controls)
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -210,14 +214,82 @@ export default function FilePreviewModal({
     setIsPlaying(!isPlaying);
   };
 
+  const handleProgress = () => {
+    if (!mediaRef.current) return;
+    const buffered = mediaRef.current.buffered;
+    const curTime = mediaRef.current.currentTime;
+    if (buffered && buffered.length > 0) {
+      let activeRangeEnd = 0;
+      for (let i = 0; i < buffered.length; i++) {
+        if (buffered.start(i) <= curTime && buffered.end(i) >= curTime) {
+          activeRangeEnd = buffered.end(i);
+          break;
+        }
+      }
+      if (activeRangeEnd === 0 && buffered.length > 0) {
+        activeRangeEnd = buffered.end(buffered.length - 1);
+      }
+      setBufferedEnd(activeRangeEnd);
+    }
+  };
+
   const handleTimeUpdate = () => {
     if (!mediaRef.current) return;
     setCurrentTime(mediaRef.current.currentTime);
+    handleProgress();
   };
 
   const handleLoadedMetadata = () => {
     if (!mediaRef.current) return;
     setDuration(mediaRef.current.duration);
+    handleProgress();
+  };
+
+  const handleSeekToPosition = (clientX: number, barRef: React.RefObject<HTMLDivElement | null>) => {
+    if (!barRef.current || !mediaRef.current || !duration) return;
+    const rect = barRef.current.getBoundingClientRect();
+    const width = rect.width;
+    const clickX = clientX - rect.left;
+    const percentage = Math.min(Math.max(0, clickX / width), 1);
+    const targetTime = percentage * duration;
+    mediaRef.current.currentTime = targetTime;
+    setCurrentTime(targetTime);
+  };
+
+  const startDragSeek = (clientX: number, barRef: React.RefObject<HTMLDivElement | null>) => {
+    setIsDraggingSeek(true);
+    handleSeekToPosition(clientX, barRef);
+
+    const handleGlobalMouseMove = (e: MouseEvent) => {
+      handleSeekToPosition(e.clientX, barRef);
+    };
+
+    const handleGlobalMouseUp = () => {
+      setIsDraggingSeek(false);
+      window.removeEventListener('mousemove', handleGlobalMouseMove);
+      window.removeEventListener('mouseup', handleGlobalMouseUp);
+    };
+
+    window.addEventListener('mousemove', handleGlobalMouseMove);
+    window.addEventListener('mouseup', handleGlobalMouseUp);
+  };
+
+  const handleProgressBarMouseDown = (e: React.MouseEvent<HTMLDivElement>, barRef: React.RefObject<HTMLDivElement | null>) => {
+    if (e.button !== 0) return; // Left click only
+    e.preventDefault();
+    startDragSeek(e.clientX, barRef);
+  };
+
+  const handleProgressBarTouchStart = (e: React.TouchEvent<HTMLDivElement>, barRef: React.RefObject<HTMLDivElement | null>) => {
+    if (e.touches.length > 0) {
+      startDragSeek(e.touches[0].clientX, barRef);
+    }
+  };
+
+  const handleProgressBarTouchMove = (e: React.TouchEvent<HTMLDivElement>, barRef: React.RefObject<HTMLDivElement | null>) => {
+    if (e.touches.length > 0) {
+      handleSeekToPosition(e.touches[0].clientX, barRef);
+    }
   };
 
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -319,6 +391,7 @@ export default function FilePreviewModal({
                   src={mediaUrl}
                   onTimeUpdate={handleTimeUpdate}
                   onLoadedMetadata={handleLoadedMetadata}
+                  onProgress={handleProgress}
                   className="max-h-full max-w-full transition-all duration-300 select-none pointer-events-none"
                   style={{
                     transform: `rotate(${rotation}deg)${ (rotation === 90 || rotation === 270) ? ' scale(0.5625)' : '' }`,
@@ -361,6 +434,14 @@ export default function FilePreviewModal({
                     <Play className="w-8 h-8 fill-white ml-1" />
                   </button>
                 )}
+
+                {/* Thin, elegant overlay progress indicator on the video box */}
+                <div className="absolute bottom-0 left-0 right-0 h-1 bg-white/10 z-30 overflow-hidden pointer-events-none group-hover:h-1.5 transition-all">
+                  <div 
+                    className="h-full bg-[#0095ff]" 
+                    style={{ width: `${(currentTime / (duration || 1)) * 100}%` }}
+                  />
+                </div>
               </div>
 
               {/* Video custom controllers bar */}
@@ -380,15 +461,38 @@ export default function FilePreviewModal({
                     {formatTime(currentTime)} / {formatTime(duration)}
                   </span>
 
-                  {/* Range Seeker */}
-                  <input
-                    type="range"
-                    min={0}
-                    max={duration || 100}
-                    value={currentTime}
-                    onChange={handleSeek}
-                    className="flex-1 min-w-[120px] h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-[#0095ff]"
-                  />
+                  {/* Custom YouTube-style 3-Layer Progress Bar */}
+                  <div 
+                    ref={videoProgressBarRef}
+                    onMouseDown={(e) => handleProgressBarMouseDown(e, videoProgressBarRef)}
+                    onTouchStart={(e) => handleProgressBarTouchStart(e, videoProgressBarRef)}
+                    onTouchMove={(e) => handleProgressBarTouchMove(e, videoProgressBarRef)}
+                    className="flex-1 min-w-[120px] relative h-3 flex items-center group cursor-pointer select-none"
+                  >
+                    {/* Progress Bar Track Container (Handles the thickness transition) */}
+                    <div className={`w-full bg-white/20 rounded-full overflow-visible relative transition-all duration-150 ${isDraggingSeek ? 'h-2' : 'h-1 group-hover:h-1.5'}`}>
+                      {/* Layer 2: Buffering Line */}
+                      <div 
+                        className="absolute left-0 top-0 h-full bg-white/25 rounded-full pointer-events-none transition-all duration-150"
+                        style={{ width: `${(bufferedEnd / (duration || 1)) * 100}%` }}
+                      />
+                      
+                      {/* Layer 3: Main Red Playback Line */}
+                      <div 
+                        className="absolute left-0 top-0 h-full bg-red-600 rounded-full pointer-events-none"
+                        style={{ width: `${(currentTime / (duration || 1)) * 100}%` }}
+                      />
+
+                      {/* YouTube style Knob/Scrubber */}
+                      <div 
+                        className={`absolute top-1/2 -translate-y-1/2 w-3.5 h-3.5 bg-red-600 rounded-full pointer-events-none transition-transform duration-150 shadow-md ${isDraggingSeek ? 'scale-100' : 'scale-0 group-hover:scale-100'}`}
+                        style={{ 
+                          left: `${(currentTime / (duration || 1)) * 100}%`,
+                          transform: `translate(-50%, -50%)`
+                        }}
+                      />
+                    </div>
+                  </div>
 
                   {/* Volume Controls */}
                   <div className="flex items-center gap-2">
@@ -454,6 +558,7 @@ export default function FilePreviewModal({
                 src={mediaUrl}
                 onTimeUpdate={handleTimeUpdate}
                 onLoadedMetadata={handleLoadedMetadata}
+                onProgress={handleProgress}
                 onEnded={() => setIsPlaying(false)}
                 className="hidden"
               />
@@ -498,14 +603,38 @@ export default function FilePreviewModal({
                     <span>{formatTime(duration)}</span>
                   </div>
 
-                  <input
-                    type="range"
-                    min={0}
-                    max={duration || 100}
-                    value={currentTime}
-                    onChange={handleSeek}
-                    className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-500"
-                  />
+                   {/* Custom YouTube-style 3-Layer Progress Bar */}
+                   <div 
+                     ref={audioProgressBarRef}
+                     onMouseDown={(e) => handleProgressBarMouseDown(e, audioProgressBarRef)}
+                     onTouchStart={(e) => handleProgressBarTouchStart(e, audioProgressBarRef)}
+                     onTouchMove={(e) => handleProgressBarTouchMove(e, audioProgressBarRef)}
+                     className="w-full relative h-3 flex items-center group cursor-pointer select-none"
+                   >
+                     {/* Progress Bar Track Container (Handles the thickness transition) */}
+                     <div className={`w-full bg-white/10 rounded-full overflow-visible relative transition-all duration-150 ${isDraggingSeek ? 'h-2' : 'h-1 group-hover:h-1.5'}`}>
+                       {/* Layer 2: Buffering Line */}
+                       <div 
+                         className="absolute left-0 top-0 h-full bg-white/20 rounded-full pointer-events-none transition-all duration-150"
+                         style={{ width: `${(bufferedEnd / (duration || 1)) * 100}%` }}
+                       />
+                       
+                       {/* Layer 3: Main Playback Line */}
+                       <div 
+                         className="absolute left-0 top-0 h-full bg-amber-500 rounded-full pointer-events-none"
+                         style={{ width: `${(currentTime / (duration || 1)) * 100}%` }}
+                       />
+
+                       {/* YouTube style Knob/Scrubber */}
+                       <div 
+                         className={`absolute top-1/2 -translate-y-1/2 w-3.5 h-3.5 bg-amber-500 rounded-full pointer-events-none transition-transform duration-150 shadow-md ${isDraggingSeek ? 'scale-100' : 'scale-0 group-hover:scale-100'}`}
+                         style={{ 
+                           left: `${(currentTime / (duration || 1)) * 100}%`,
+                           transform: `translate(-50%, -50%)`
+                         }}
+                       />
+                     </div>
+                   </div>
 
                   <div className="flex items-center justify-between pt-3">
                     <button

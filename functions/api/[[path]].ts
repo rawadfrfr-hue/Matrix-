@@ -50,6 +50,30 @@ export const onRequest = async (context: any) => {
   const dbUrl = env.FIREBASE_DATABASE_URL || `https://${env.FIREBASE_PROJECT_ID || "zetta-cloud-79576"}-default-rtdb.firebaseio.com`;
 
   try {
+    // 0. GET /api/config
+    if (path === "/api/config" && method === "GET") {
+      const quotaGb = parseFloat(env.STORAGE_QUOTA_GB || '15');
+      const projectId = env.FIREBASE_PROJECT_ID || "zetta-cloud-79576";
+      const apiKey = env.FIREBASE_API_KEY || "AIzaSyDdOlFojXzAgbpaG-IUvSumtYe3Y1EdKqI";
+      const databaseURL = env.FIREBASE_DATABASE_URL || `https://${projectId}-default-rtdb.firebaseio.com`;
+
+      return new Response(JSON.stringify({
+        storageQuotaGb: quotaGb,
+        storageQuotaBytes: quotaGb * 1024 * 1024 * 1024,
+        firebaseConfig: {
+          apiKey,
+          authDomain: `${projectId}.firebaseapp.com`,
+          projectId,
+          storageBucket: `${projectId}.firebasestorage.app`,
+          messagingSenderId: "1550730436",
+          appId: "1:1550730436:web:b0d748b19f918fed907591",
+          databaseURL
+        }
+      }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" }
+      });
+    }
+
     // 1. GET /api/files
     if (path === "/api/files" && method === "GET") {
       const resDb = await fetch(`${dbUrl}/files.json`);
@@ -166,7 +190,7 @@ export const onRequest = async (context: any) => {
     // 5. POST /api/upload/presign
     if (path === "/api/upload/presign" && method === "POST") {
       const body: any = await request.json();
-      const { fileName, fileSize, fileType } = body;
+      const { fileName, fileSize, fileType, ownerEmail } = body;
 
       if (!fileName || fileSize == null) {
         return new Response(JSON.stringify({ error: 'Missing file metadata' }), {
@@ -180,6 +204,30 @@ export const onRequest = async (context: any) => {
       // Calculate used space
       const resDbAll = await fetch(`${dbUrl}/files.json`);
       const allFiles = await resDbAll.json() || {};
+
+      // ENFORCE USER QUOTA FIRST
+      const actualOwner = ownerEmail || 'anonymous';
+      const quotaGb = parseFloat(env.STORAGE_QUOTA_GB || '15');
+      const maxQuotaBytes = quotaGb * 1024 * 1024 * 1024;
+      if (actualOwner && actualOwner !== 'anonymous') {
+        let userUsedSpace = 0;
+        Object.values(allFiles).forEach((file: any) => {
+          if (file && file.ownerEmail === actualOwner && file.fileSize) {
+            userUsedSpace += Number(file.fileSize);
+          }
+        });
+        if (userUsedSpace + fileSize > maxQuotaBytes) {
+          const usedGb = (userUsedSpace / (1024 * 1024 * 1024)).toFixed(2);
+          const fileMb = (fileSize / (1024 * 1024)).toFixed(2);
+          return new Response(JSON.stringify({
+            error: `Storage Quota Exceeded. You have used ${usedGb} GB out of ${quotaGb} GB. Uploading this file (${fileMb} MB) would exceed your limit.`
+          }), {
+            status: 403,
+            headers: corsHeaders
+          });
+        }
+      }
+
       const usedSpaceMap: Record<string, number> = {};
 
       for (const acct of b2Accounts) {
@@ -303,7 +351,7 @@ export const onRequest = async (context: any) => {
     // 7. POST /api/upload/multipart/initiate
     if (path === "/api/upload/multipart/initiate" && method === "POST") {
       const body: any = await request.json();
-      const { fileName, fileSize, fileType } = body;
+      const { fileName, fileSize, fileType, ownerEmail } = body;
 
       if (!fileName || fileSize == null) {
         return new Response(JSON.stringify({ error: 'Missing file metadata' }), {
@@ -316,6 +364,30 @@ export const onRequest = async (context: any) => {
       
       const resDbAll = await fetch(`${dbUrl}/files.json`);
       const allFiles = await resDbAll.json() || {};
+
+      // ENFORCE USER QUOTA FIRST
+      const actualOwner = ownerEmail || 'anonymous';
+      const quotaGb = parseFloat(env.STORAGE_QUOTA_GB || '15');
+      const maxQuotaBytes = quotaGb * 1024 * 1024 * 1024;
+      if (actualOwner && actualOwner !== 'anonymous') {
+        let userUsedSpace = 0;
+        Object.values(allFiles).forEach((file: any) => {
+          if (file && file.ownerEmail === actualOwner && file.fileSize) {
+            userUsedSpace += Number(file.fileSize);
+          }
+        });
+        if (userUsedSpace + fileSize > maxQuotaBytes) {
+          const usedGb = (userUsedSpace / (1024 * 1024 * 1024)).toFixed(2);
+          const fileMb = (fileSize / (1024 * 1024)).toFixed(2);
+          return new Response(JSON.stringify({
+            error: `Storage Quota Exceeded. You have used ${usedGb} GB out of ${quotaGb} GB. Uploading this file (${fileMb} MB) would exceed your limit.`
+          }), {
+            status: 403,
+            headers: corsHeaders
+          });
+        }
+      }
+
       const usedSpaceMap: Record<string, number> = {};
 
       for (const acct of b2Accounts) {

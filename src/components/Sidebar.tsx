@@ -26,6 +26,7 @@ interface SidebarProps {
   totalFilesSize: number;
   totalFoldersCount: number;
   totalFilesCount: number;
+  storageQuotaGb?: number;
   onLogOut: () => void;
 }
 
@@ -39,6 +40,7 @@ export default function Sidebar({
   totalFilesSize,
   totalFoldersCount,
   totalFilesCount,
+  storageQuotaGb = 15,
   onLogOut
 }: SidebarProps) {
   
@@ -131,16 +133,16 @@ export default function Sidebar({
           <div className="bg-[#161b22]/50 border border-white/5 rounded-2xl p-4 space-y-4">
             <div className="flex justify-between items-center">
               <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Cloud Stats</span>
-              <span className="bg-[#0095ff]/10 text-[#0095ff] text-[9px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider">5 GB Free</span>
             </div>
             <div className="space-y-2">
               <div className="flex justify-between text-xs text-slate-400">
                 <span>Storage Used</span>
                 <span className="font-semibold text-slate-200">
                   {(() => {
-                    const quota = 5 * 1024 * 1024 * 1024; // 5 GB in bytes
+                    const quota = storageQuotaGb * 1024 * 1024 * 1024;
                     const usedPercent = Math.min(100, Math.max(0, (totalFilesSize / quota) * 100));
-                    return `${usedPercent % 1 === 0 ? usedPercent.toFixed(0) : usedPercent.toFixed(1)}%`;
+                    const percentStr = usedPercent % 1 === 0 ? usedPercent.toFixed(0) : usedPercent.toFixed(1);
+                    return `${percentStr}% of ${storageQuotaGb} GB Used`;
                   })()}
                 </span>
               </div>
@@ -150,7 +152,7 @@ export default function Sidebar({
                   className="bg-[#0095ff] h-1.5 rounded-full transition-all duration-500 shadow-[0_0_8px_rgba(0,149,255,0.4)]" 
                   style={{ 
                     width: (() => {
-                      const quota = 5 * 1024 * 1024 * 1024; // 5 GB in bytes
+                      const quota = storageQuotaGb * 1024 * 1024 * 1024;
                       const usedPercent = Math.min(100, Math.max(0, (totalFilesSize / quota) * 100));
                       return `${usedPercent}%`;
                     })()

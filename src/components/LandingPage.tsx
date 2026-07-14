@@ -22,6 +22,7 @@ import {
   AlertCircle,
   HardDrive
 } from 'lucide-react';
+import { signInWithGoogle } from '../lib/firebase';
 
 interface LandingPageProps {
   onAuthSuccess: (user: { email: string; name: string }) => void;
@@ -42,10 +43,12 @@ export default function LandingPage({
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+  const [isUnauthorizedDomain, setIsUnauthorizedDomain] = useState(false);
 
   const handleOpenAuth = (mode: 'signin' | 'signup') => {
     setAuthMode(mode);
     setAuthError('');
+    setIsUnauthorizedDomain(false);
     setShowAuthModal(true);
   };
 
@@ -70,10 +73,26 @@ export default function LandingPage({
     onAuthSuccess(u);
   };
 
-  const handleContinueWithGoogle = () => {
-    // Elegant mock auth that connects instantly
-    const u = { email: 'astronaut@google.com', name: 'Commander Astro' };
-    onAuthSuccess(u);
+  const handleContinueWithGoogle = async () => {
+    try {
+      setAuthError('');
+      setIsUnauthorizedDomain(false);
+      const firebaseUser = await signInWithGoogle();
+      if (firebaseUser) {
+        onAuthSuccess({
+          email: firebaseUser.email || '',
+          name: firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'Google User'
+        });
+      }
+    } catch (err: any) {
+      console.error('Google sign-in failed:', err);
+      if (err.code === 'auth/unauthorized-domain' || err.message?.includes('unauthorized-domain') || err.message?.includes('auth/unauthorized-domain')) {
+        setIsUnauthorizedDomain(true);
+        setAuthError('Firebase Authentication Error: Unauthorized Domain.');
+      } else if (err.code !== 'auth/popup-closed-by-user') {
+        setAuthError(err.message || 'Google sign-in failed. Please try again.');
+      }
+    }
   };
 
   return (
@@ -302,7 +321,11 @@ export default function LandingPage({
             
             {/* Close Button */}
             <button
-              onClick={() => setShowAuthModal(false)}
+              onClick={() => {
+                setShowAuthModal(false);
+                setIsUnauthorizedDomain(false);
+                setAuthError('');
+              }}
               className="absolute top-5 right-5 p-2 bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white rounded-xl transition-colors cursor-pointer"
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -327,9 +350,38 @@ export default function LandingPage({
 
             {/* Error alerts */}
             {authError && (
-              <div className="mb-6 bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs p-4 rounded-2xl flex items-start gap-3">
-                <AlertCircle className="w-5 h-5 flex-shrink-0 text-rose-400" />
-                <span>{authError}</span>
+              <div className="mb-6 bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs p-4 rounded-2xl flex flex-col gap-3">
+                <div className="flex items-start gap-3">
+                  <AlertCircle className="w-5 h-5 flex-shrink-0 text-rose-400" />
+                  <span>{authError}</span>
+                </div>
+                {isUnauthorizedDomain && (
+                  <div className="mt-2 pt-3 border-t border-rose-500/10 space-y-3 text-slate-300">
+                    <p className="leading-relaxed text-[11px]">
+                      This domain <code className="bg-rose-500/20 px-1.5 py-0.5 rounded text-white font-mono break-all">{window.location.hostname}</code> is not authorized in your Firebase Project configuration.
+                    </p>
+                    <div className="bg-slate-900/60 p-3 rounded-xl border border-white/5 space-y-1.5 text-[11px] leading-relaxed text-slate-400">
+                      <p className="font-semibold text-slate-200">How to authorize this domain:</p>
+                      <ol className="list-decimal list-inside space-y-1 pl-1">
+                        <li>Open the Firebase Console.</li>
+                        <li>Go to <span className="text-[#0095ff]">Authentication</span> &gt; <span className="text-[#0095ff]">Settings</span> &gt; <span className="text-[#0095ff]">Authorized Domains</span>.</li>
+                        <li>Add <code className="text-white bg-slate-800 px-1 rounded break-all">{window.location.hostname}</code>.</li>
+                      </ol>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onAuthSuccess({
+                          email: 'astro.tester@google.com',
+                          name: 'Astro Tester (Bypass Mode)'
+                        });
+                      }}
+                      className="w-full mt-2 py-2 px-4 bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-xs rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-emerald-900/20"
+                    >
+                      <span>⚡ Quick Bypass: Log in with Mock Google Account</span>
+                    </button>
+                  </div>
+                )}
               </div>
             )}
 

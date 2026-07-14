@@ -216,6 +216,29 @@ function getS3Client(acct: B2Account): S3Client {
   });
 }
 
+async function checkUserQuota(ownerEmail: string, fileSize: number): Promise<void> {
+  const quotaGb = parseFloat(process.env.STORAGE_QUOTA_GB || '15');
+  const maxQuotaBytes = quotaGb * 1024 * 1024 * 1024;
+
+  if (ownerEmail && ownerEmail !== 'anonymous') {
+    const db = getDb();
+    const filesSnap = await db.ref('/files').once('value');
+    const filesVal = filesSnap.val() || {};
+    let userUsedSpace = 0;
+    Object.values(filesVal).forEach((file: any) => {
+      if (file && file.ownerEmail === ownerEmail && file.fileSize) {
+        userUsedSpace += Number(file.fileSize);
+      }
+    });
+
+    if (userUsedSpace + fileSize > maxQuotaBytes) {
+      const usedGb = (userUsedSpace / (1024 * 1024 * 1024)).toFixed(2);
+      const fileMb = (fileSize / (1024 * 1024)).toFixed(2);
+      throw new Error(`Storage Quota Exceeded. You have used ${usedGb} GB out of ${quotaGb} GB. Uploading this file (${fileMb} MB) would exceed your limit.`);
+    }
+  }
+}
+
 async function startServer() {
   const projectId = process.env.FIREBASE_PROJECT_ID || "zetta-cloud-79576";
   try {
@@ -245,9 +268,16 @@ async function startServer() {
   // Multipart initiate route
   app.post('/api/upload/multipart/initiate', async (req, res) => {
     try {
-      const { fileName, fileSize, fileType } = req.body;
+      const { fileName, fileSize, fileType, ownerEmail } = req.body;
       if (!fileName || fileSize == null) {
         return res.status(400).json({ error: 'Missing file metadata' });
+      }
+
+      // Check User Storage Quota
+      try {
+        await checkUserQuota(ownerEmail, fileSize);
+      } catch (quotaErr: any) {
+        return res.status(403).json({ error: quotaErr.message });
       }
 
       // Smart Load Balancer
@@ -432,9 +462,16 @@ async function startServer() {
   // 1a. PRESIGNED URL ROUTE
   app.post('/api/upload/presign', async (req, res) => {
     try {
-      const { fileName, fileSize, fileType } = req.body;
+      const { fileName, fileSize, fileType, ownerEmail } = req.body;
       if (!fileName || fileSize == null) {
         return res.status(400).json({ error: 'Missing file metadata' });
+      }
+
+      // Check User Storage Quota
+      try {
+        await checkUserQuota(ownerEmail, fileSize);
+      } catch (quotaErr: any) {
+        return res.status(403).json({ error: quotaErr.message });
       }
 
       // Smart Load Balancer
@@ -585,6 +622,28 @@ async function startServer() {
 
   app.get('/api/download/:fileId', handleDownload);
   app.get('/api/file/:fileId', handleDownload);
+
+  // 2b. GET CONFIG ROUTE
+  app.get('/api/config', (req, res) => {
+    const quotaGb = parseFloat(process.env.STORAGE_QUOTA_GB || '15');
+    const projectId = process.env.FIREBASE_PROJECT_ID || "zetta-cloud-79576";
+    const apiKey = process.env.FIREBASE_API_KEY || "AIzaSyDdOlFojXzAgbpaG-IUvSumtYe3Y1EdKqI";
+    const databaseURL = process.env.FIREBASE_DATABASE_URL || `https://${projectId}-default-rtdb.firebaseio.com`;
+
+    res.json({
+      storageQuotaGb: quotaGb,
+      storageQuotaBytes: quotaGb * 1024 * 1024 * 1024,
+      firebaseConfig: {
+        apiKey,
+        authDomain: `${projectId}.firebaseapp.com`,
+        projectId,
+        storageBucket: `${projectId}.firebasestorage.app`,
+        messagingSenderId: "1550730436",
+        appId: "1:1550730436:web:b0d748b19f918fed907591",
+        databaseURL
+      }
+    });
+  });
 
   // 3. GET FILES ROUTE
   app.get('/api/files', async (req, res) => {

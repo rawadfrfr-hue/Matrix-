@@ -59,6 +59,10 @@ export default function SharedFilePage({ fileId, onClose }: SharedFilePageProps)
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
+  const [bufferedEnd, setBufferedEnd] = useState(0);
+  const [isDraggingSeek, setIsDraggingSeek] = useState(false);
+  const videoProgressBarRef = useRef<HTMLDivElement>(null);
+  const audioProgressBarRef = useRef<HTMLDivElement>(null);
 
   // Advanced Video/Media features
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -168,10 +172,32 @@ export default function SharedFilePage({ fileId, onClose }: SharedFilePageProps)
     }
   };
 
+  const handleProgress = () => {
+    const media = videoRef.current || audioRef.current;
+    if (media) {
+      const buffered = media.buffered;
+      const curTime = media.currentTime;
+      if (buffered && buffered.length > 0) {
+        let activeRangeEnd = 0;
+        for (let i = 0; i < buffered.length; i++) {
+          if (buffered.start(i) <= curTime && buffered.end(i) >= curTime) {
+            activeRangeEnd = buffered.end(i);
+            break;
+          }
+        }
+        if (activeRangeEnd === 0 && buffered.length > 0) {
+          activeRangeEnd = buffered.end(buffered.length - 1);
+        }
+        setBufferedEnd(activeRangeEnd);
+      }
+    }
+  };
+
   const handleTimeUpdate = () => {
     const media = videoRef.current || audioRef.current;
     if (media) {
       setCurrentTime(media.currentTime);
+      handleProgress();
     }
   };
 
@@ -179,6 +205,55 @@ export default function SharedFilePage({ fileId, onClose }: SharedFilePageProps)
     const media = videoRef.current || audioRef.current;
     if (media) {
       setDuration(media.duration);
+      handleProgress();
+    }
+  };
+
+  const handleSeekToPosition = (clientX: number, barRef: React.RefObject<HTMLDivElement | null>) => {
+    const media = videoRef.current || audioRef.current;
+    if (!barRef.current || !media || !duration) return;
+    const rect = barRef.current.getBoundingClientRect();
+    const width = rect.width;
+    const clickX = clientX - rect.left;
+    const percentage = Math.min(Math.max(0, clickX / width), 1);
+    const targetTime = percentage * duration;
+    media.currentTime = targetTime;
+    setCurrentTime(targetTime);
+  };
+
+  const startDragSeek = (clientX: number, barRef: React.RefObject<HTMLDivElement | null>) => {
+    setIsDraggingSeek(true);
+    handleSeekToPosition(clientX, barRef);
+
+    const handleGlobalMouseMove = (e: MouseEvent) => {
+      handleSeekToPosition(e.clientX, barRef);
+    };
+
+    const handleGlobalMouseUp = () => {
+      setIsDraggingSeek(false);
+      window.removeEventListener('mousemove', handleGlobalMouseMove);
+      window.removeEventListener('mouseup', handleGlobalMouseUp);
+    };
+
+    window.addEventListener('mousemove', handleGlobalMouseMove);
+    window.addEventListener('mouseup', handleGlobalMouseUp);
+  };
+
+  const handleProgressBarMouseDown = (e: React.MouseEvent<HTMLDivElement>, barRef: React.RefObject<HTMLDivElement | null>) => {
+    if (e.button !== 0) return; // Left click only
+    e.preventDefault();
+    startDragSeek(e.clientX, barRef);
+  };
+
+  const handleProgressBarTouchStart = (e: React.TouchEvent<HTMLDivElement>, barRef: React.RefObject<HTMLDivElement | null>) => {
+    if (e.touches.length > 0) {
+      startDragSeek(e.touches[0].clientX, barRef);
+    }
+  };
+
+  const handleProgressBarTouchMove = (e: React.TouchEvent<HTMLDivElement>, barRef: React.RefObject<HTMLDivElement | null>) => {
+    if (e.touches.length > 0) {
+      handleSeekToPosition(e.touches[0].clientX, barRef);
     }
   };
 
@@ -453,6 +528,7 @@ export default function SharedFilePage({ fileId, onClose }: SharedFilePageProps)
                   src={downloadUrl}
                   onTimeUpdate={handleTimeUpdate}
                   onLoadedMetadata={handleLoadedMetadata}
+                  onProgress={handleProgress}
                   className="w-full h-full object-contain select-none pointer-events-none"
                   style={{
                     filter: `brightness(${brightness})`,
@@ -471,6 +547,7 @@ export default function SharedFilePage({ fileId, onClose }: SharedFilePageProps)
                     src={downloadUrl}
                     onTimeUpdate={handleTimeUpdate}
                     onLoadedMetadata={handleLoadedMetadata}
+                    onProgress={handleProgress}
                   />
                   <div className={`w-28 h-28 rounded-full bg-gradient-to-tr from-[#0095ff] to-cyan-500 p-0.5 shadow-xl ${isPlaying ? 'animate-spin' : ''}`} style={{ animationDuration: '10s' }}>
                     <div className="w-full h-full bg-[#07090e] rounded-full flex items-center justify-center relative">
@@ -628,20 +705,37 @@ export default function SharedFilePage({ fileId, onClose }: SharedFilePageProps)
               {(isVideo || isAudio) && !isLocked && (
                 <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/95 via-black/50 to-transparent p-4 opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col gap-2.5 z-30">
                   
-                  {/* Progress Line */}
-                  <div className="relative group/progress h-1 w-full bg-white/20 rounded-full overflow-hidden">
-                    <div 
-                      className="absolute left-0 top-0 h-full bg-[#0095ff]" 
-                      style={{ width: `${(currentTime / (duration || 1)) * 100}%` }}
-                    />
-                    <input 
-                      type="range"
-                      min={0}
-                      max={duration || 100}
-                      value={currentTime}
-                      onChange={handleSeekChange}
-                      className="absolute inset-0 opacity-0 cursor-pointer w-full h-full z-10"
-                    />
+                  {/* Custom YouTube-style 3-Layer Progress Bar */}
+                  <div 
+                    ref={videoProgressBarRef}
+                    onMouseDown={(e) => { e.stopPropagation(); handleProgressBarMouseDown(e, videoProgressBarRef); }}
+                    onTouchStart={(e) => { e.stopPropagation(); handleProgressBarTouchStart(e, videoProgressBarRef); }}
+                    onTouchMove={(e) => { e.stopPropagation(); handleProgressBarTouchMove(e, videoProgressBarRef); }}
+                    className="w-full relative h-3 flex items-center group/progress cursor-pointer select-none"
+                  >
+                    {/* Progress Bar Track Container (Handles the thickness transition) */}
+                    <div className={`w-full bg-white/20 rounded-full overflow-visible relative transition-all duration-150 ${isDraggingSeek ? 'h-2' : 'h-1 group-hover/progress:h-1.5'}`}>
+                      {/* Layer 2: Buffering Line */}
+                      <div 
+                        className="absolute left-0 top-0 h-full bg-white/25 rounded-full pointer-events-none transition-all duration-150"
+                        style={{ width: `${(bufferedEnd / (duration || 1)) * 100}%` }}
+                      />
+                      
+                      {/* Layer 3: Main Red Playback Line */}
+                      <div 
+                        className="absolute left-0 top-0 h-full bg-red-600 rounded-full pointer-events-none"
+                        style={{ width: `${(currentTime / (duration || 1)) * 100}%` }}
+                      />
+
+                      {/* YouTube style Knob/Scrubber */}
+                      <div 
+                        className={`absolute top-1/2 -translate-y-1/2 w-3.5 h-3.5 bg-red-600 rounded-full pointer-events-none transition-transform duration-150 shadow-md ${isDraggingSeek ? 'scale-100' : 'scale-0 group-hover/progress:scale-100'}`}
+                        style={{ 
+                          left: `${(currentTime / (duration || 1)) * 100}%`,
+                          transform: `translate(-50%, -50%)`
+                        }}
+                      />
+                    </div>
                   </div>
 
                   {/* Controls Row */}

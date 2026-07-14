@@ -43,6 +43,7 @@ import FilePreviewModal from './components/FilePreviewModal';
 import Sidebar from './components/Sidebar';
 import SharedFilePage from './components/SharedFilePage';
 import { generateVideoThumbnail, generateVideoThumbnailFromUrl } from './utils/thumbnail';
+import { initializeFirebaseClient, logoutClient } from './lib/firebase';
 
 // Helper to parse routing paths
 const getTabFromPath = (pathname: string): { tab: ActiveTab; folderId: string | null } => {
@@ -75,6 +76,27 @@ export default function App() {
   const [user, setUser] = useState<{ email: string; name: string } | null>(null);
   const [authError, setAuthError] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
+  const [storageQuotaGb, setStorageQuotaGb] = useState<number>(15);
+
+  // Load dynamic storage configuration on mount
+  useEffect(() => {
+    fetch('/api/config')
+      .then(res => {
+        if (res.ok) return res.json();
+        throw new Error('Failed to fetch config');
+      })
+      .then(data => {
+        if (data && typeof data.storageQuotaGb === 'number') {
+          setStorageQuotaGb(data.storageQuotaGb);
+        }
+        if (data && data.firebaseConfig) {
+          initializeFirebaseClient(data.firebaseConfig);
+        }
+      })
+      .catch(err => {
+        console.warn('Could not load dynamic storage quota, using fallback of 15 GB:', err);
+      });
+  }, []);
 
   // Layout & Navigation State
   const [isNavigatingLoader, setIsNavigatingLoader] = useState(false);
@@ -152,6 +174,19 @@ export default function App() {
   // Sync state on browser forward/back operations (History routing)
   useEffect(() => {
     const handlePopState = () => {
+      // 1. Sync non-video previews based on the preview query parameter
+      const searchParams = new URLSearchParams(window.location.search);
+      const previewId = searchParams.get('preview');
+      if (!previewId) {
+        setPreviewItem(null);
+      }
+
+      // 2. Parse and sync video/shared file page ID based on the pathname
+      const pathParts = window.location.pathname.split('/');
+      const idx = pathParts.findIndex(p => p === 'share' || p === 'shared');
+      const sId = (idx !== -1 && pathParts[idx + 1]) ? pathParts[idx + 1] : null;
+      setSharedFileId(sId);
+
       const { tab, folderId } = getTabFromPath(window.location.pathname);
       setIsNavigatingLoader(true);
       setTimeout(() => {
@@ -265,6 +300,20 @@ export default function App() {
       localStorage.setItem(savedItemsKey, JSON.stringify(initialItems));
     }
   }, [user]);
+
+  // Open file preview automatically if a preview query parameter is present on load
+  useEffect(() => {
+    if (items.length > 0 && !previewItem) {
+      const searchParams = new URLSearchParams(window.location.search);
+      const previewId = searchParams.get('preview');
+      if (previewId) {
+        const itemToPreview = items.find(i => i.id === previewId || i.fileId === previewId);
+        if (itemToPreview) {
+          setPreviewItem(itemToPreview);
+        }
+      }
+    }
+  }, [items]);
 
   // Sync real uploaded files from the backend database for current user
   const fetchBackendFiles = async () => {
@@ -385,6 +434,7 @@ export default function App() {
   };
 
   const handleLogOut = () => {
+    logoutClient().catch(err => console.error('Error logging out from firebase:', err));
     setUser(null);
     localStorage.removeItem('nexus_cloud_user');
     setCurrentFolderId(null);
@@ -652,7 +702,8 @@ export default function App() {
           body: JSON.stringify({
             fileName: file.name,
             fileSize: file.size,
-            fileType: file.type || 'application/octet-stream'
+            fileType: file.type || 'application/octet-stream',
+            ownerEmail: user?.email || 'anonymous'
           })
         });
 
@@ -762,7 +813,8 @@ export default function App() {
           body: JSON.stringify({
             fileName: file.name,
             fileSize: file.size,
-            fileType: file.type || 'application/octet-stream'
+            fileType: file.type || 'application/octet-stream',
+            ownerEmail: user?.email || 'anonymous'
           })
         });
 
@@ -982,6 +1034,7 @@ export default function App() {
       window.history.pushState({}, '', `/share/${fileId}`);
     } else {
       setPreviewItem(item);
+      window.history.pushState({ preview: item.id }, '', window.location.pathname + `?preview=${item.id}`);
     }
   };
 
@@ -1123,6 +1176,7 @@ export default function App() {
         totalFilesSize={totalFilesSize}
         totalFoldersCount={totalFoldersCount}
         totalFilesCount={totalFilesCount}
+        storageQuotaGb={storageQuotaGb}
         onLogOut={handleLogOut}
       />
 
@@ -2027,7 +2081,13 @@ export default function App() {
       {previewItem && (
         <FilePreviewModal
           item={previewItem}
-          onClose={() => setPreviewItem(null)}
+          onClose={() => {
+            setPreviewItem(null);
+            const searchParams = new URLSearchParams(window.location.search);
+            if (searchParams.get('preview')) {
+              window.history.back();
+            }
+          }}
           onExtractSimulated={handleExtractSimulated}
         />
       )}
