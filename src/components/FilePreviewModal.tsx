@@ -467,31 +467,30 @@ export default function FilePreviewModal({
                     onMouseDown={(e) => handleProgressBarMouseDown(e, videoProgressBarRef)}
                     onTouchStart={(e) => handleProgressBarTouchStart(e, videoProgressBarRef)}
                     onTouchMove={(e) => handleProgressBarTouchMove(e, videoProgressBarRef)}
-                    className="flex-1 min-w-[120px] relative h-3 flex items-center group cursor-pointer select-none"
+                    className="flex-1 min-w-[120px] w-full relative h-[20px] flex items-center group cursor-pointer select-none z-40"
                   >
-                    {/* Progress Bar Track Container (Handles the thickness transition) */}
-                    <div className={`w-full bg-white/20 rounded-full overflow-visible relative transition-all duration-150 ${isDraggingSeek ? 'h-2' : 'h-1 group-hover:h-1.5'}`}>
+                    {/* Progress Bar Track Container */}
+                    <div className={`w-full bg-white/30 rounded-full overflow-hidden relative transition-all duration-150 ${isDraggingSeek ? 'h-[8px]' : 'h-[5px] group-hover:h-[8px]'}`}>
                       {/* Layer 2: Buffering Line */}
                       <div 
-                        className="absolute left-0 top-0 h-full bg-white/25 rounded-full pointer-events-none transition-all duration-150"
-                        style={{ width: `${(bufferedEnd / (duration || 1)) * 100}%` }}
+                        className="absolute left-0 top-0 h-full bg-white/50 pointer-events-none transition-all duration-150 z-10"
+                        style={{ width: `${duration > 0 ? (bufferedEnd / duration) * 100 : 0}%` }}
                       />
                       
                       {/* Layer 3: Main Red Playback Line */}
                       <div 
-                        className="absolute left-0 top-0 h-full bg-red-600 rounded-full pointer-events-none"
-                        style={{ width: `${(currentTime / (duration || 1)) * 100}%` }}
-                      />
-
-                      {/* YouTube style Knob/Scrubber */}
-                      <div 
-                        className={`absolute top-1/2 -translate-y-1/2 w-3.5 h-3.5 bg-red-600 rounded-full pointer-events-none transition-transform duration-150 shadow-md ${isDraggingSeek ? 'scale-100' : 'scale-0 group-hover:scale-100'}`}
-                        style={{ 
-                          left: `${(currentTime / (duration || 1)) * 100}%`,
-                          transform: `translate(-50%, -50%)`
-                        }}
+                        className="absolute left-0 top-0 h-full bg-red-600 pointer-events-none z-20"
+                        style={{ width: `${duration > 0 ? (currentTime / duration) * 100 : 0}%` }}
                       />
                     </div>
+                    {/* YouTube style Knob/Scrubber */}
+                    <div 
+                      className={`absolute top-1/2 -translate-y-1/2 w-4 h-4 bg-red-600 rounded-full pointer-events-none transition-transform duration-150 shadow-md z-30 ${isDraggingSeek ? 'scale-100' : 'scale-0 group-hover:scale-100'}`}
+                      style={{ 
+                        left: `${duration > 0 ? (currentTime / duration) * 100 : 0}%`,
+                        transform: `translate(-50%, -50%)`
+                      }}
+                    />
                   </div>
 
                   {/* Volume Controls */}
@@ -609,31 +608,30 @@ export default function FilePreviewModal({
                      onMouseDown={(e) => handleProgressBarMouseDown(e, audioProgressBarRef)}
                      onTouchStart={(e) => handleProgressBarTouchStart(e, audioProgressBarRef)}
                      onTouchMove={(e) => handleProgressBarTouchMove(e, audioProgressBarRef)}
-                     className="w-full relative h-3 flex items-center group cursor-pointer select-none"
+                     className="w-full relative h-[20px] flex items-center group cursor-pointer select-none z-40"
                    >
-                     {/* Progress Bar Track Container (Handles the thickness transition) */}
-                     <div className={`w-full bg-white/10 rounded-full overflow-visible relative transition-all duration-150 ${isDraggingSeek ? 'h-2' : 'h-1 group-hover:h-1.5'}`}>
+                     {/* Progress Bar Track Container */}
+                     <div className={`w-full bg-white/10 rounded-full overflow-hidden relative transition-all duration-150 ${isDraggingSeek ? 'h-[8px]' : 'h-[5px] group-hover:h-[8px]'}`}>
                        {/* Layer 2: Buffering Line */}
                        <div 
-                         className="absolute left-0 top-0 h-full bg-white/20 rounded-full pointer-events-none transition-all duration-150"
-                         style={{ width: `${(bufferedEnd / (duration || 1)) * 100}%` }}
+                         className="absolute left-0 top-0 h-full bg-white/20 pointer-events-none transition-all duration-150 z-10"
+                         style={{ width: `${duration > 0 ? (bufferedEnd / duration) * 100 : 0}%` }}
                        />
                        
                        {/* Layer 3: Main Playback Line */}
                        <div 
-                         className="absolute left-0 top-0 h-full bg-amber-500 rounded-full pointer-events-none"
-                         style={{ width: `${(currentTime / (duration || 1)) * 100}%` }}
-                       />
-
-                       {/* YouTube style Knob/Scrubber */}
-                       <div 
-                         className={`absolute top-1/2 -translate-y-1/2 w-3.5 h-3.5 bg-amber-500 rounded-full pointer-events-none transition-transform duration-150 shadow-md ${isDraggingSeek ? 'scale-100' : 'scale-0 group-hover:scale-100'}`}
-                         style={{ 
-                           left: `${(currentTime / (duration || 1)) * 100}%`,
-                           transform: `translate(-50%, -50%)`
-                         }}
+                         className="absolute left-0 top-0 h-full bg-amber-500 pointer-events-none z-20"
+                         style={{ width: `${duration > 0 ? (currentTime / duration) * 100 : 0}%` }}
                        />
                      </div>
+                     {/* YouTube style Knob/Scrubber */}
+                     <div 
+                       className={`absolute top-1/2 -translate-y-1/2 w-4 h-4 bg-amber-500 rounded-full pointer-events-none transition-transform duration-150 shadow-md z-30 ${isDraggingSeek ? 'scale-100' : 'scale-0 group-hover:scale-100'}`}
+                       style={{ 
+                         left: `${duration > 0 ? (currentTime / duration) * 100 : 0}%`,
+                         transform: `translate(-50%, -50%)`
+                       }}
+                     />
                    </div>
 
                   <div className="flex items-center justify-between pt-3">

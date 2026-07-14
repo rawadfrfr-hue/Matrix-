@@ -694,16 +694,16 @@ export default function SharedFilePage({ fileId, onClose }: SharedFilePageProps)
                     e.stopPropagation();
                     toggleFullscreen();
                   }}
-                  className="absolute bottom-3.5 right-3.5 p-2 rounded-xl bg-black/55 backdrop-blur-md border border-white/5 text-white/50 hover:text-white hover:bg-black/75 transition-all z-40 shadow-lg"
+                  className="absolute bottom-3.5 right-3.5 p-2 rounded-xl bg-black/55 backdrop-blur-md border border-white/5 text-white/50 hover:text-white hover:bg-black/75 transition-all z-50 shadow-lg cursor-pointer touch-manipulation"
                   title="Fullscreen"
                 >
-                  {isFullscreen ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
+                  {isFullscreen ? <Minimize2 className="w-4 h-4 drop-shadow-md" /> : <Maximize2 className="w-4 h-4 drop-shadow-md" />}
                 </button>
               )}
 
               {/* MEGA Style Bottom Video Controls Overlay (with swipe guidance) */}
               {(isVideo || isAudio) && !isLocked && (
-                <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/95 via-black/50 to-transparent p-4 opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col gap-2.5 z-30">
+                <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/95 via-black/50 to-transparent p-4 flex flex-col gap-2.5 z-40 pointer-events-auto">
                   
                   {/* Custom YouTube-style 3-Layer Progress Bar */}
                   <div 
@@ -711,31 +711,30 @@ export default function SharedFilePage({ fileId, onClose }: SharedFilePageProps)
                     onMouseDown={(e) => { e.stopPropagation(); handleProgressBarMouseDown(e, videoProgressBarRef); }}
                     onTouchStart={(e) => { e.stopPropagation(); handleProgressBarTouchStart(e, videoProgressBarRef); }}
                     onTouchMove={(e) => { e.stopPropagation(); handleProgressBarTouchMove(e, videoProgressBarRef); }}
-                    className="w-full relative h-3 flex items-center group/progress cursor-pointer select-none"
+                    className="w-full relative h-[20px] flex items-center group/progress cursor-pointer select-none"
                   >
                     {/* Progress Bar Track Container (Handles the thickness transition) */}
-                    <div className={`w-full bg-white/20 rounded-full overflow-visible relative transition-all duration-150 ${isDraggingSeek ? 'h-2' : 'h-1 group-hover/progress:h-1.5'}`}>
+                    <div className={`w-full bg-white/30 rounded-full overflow-hidden relative transition-all duration-150 ${isDraggingSeek ? 'h-[8px]' : 'h-[5px] group-hover/progress:h-[8px]'}`}>
                       {/* Layer 2: Buffering Line */}
                       <div 
-                        className="absolute left-0 top-0 h-full bg-white/25 rounded-full pointer-events-none transition-all duration-150"
-                        style={{ width: `${(bufferedEnd / (duration || 1)) * 100}%` }}
+                        className="absolute left-0 top-0 h-full bg-white/50 pointer-events-none transition-all duration-150 z-10"
+                        style={{ width: `${duration > 0 ? (bufferedEnd / duration) * 100 : 0}%` }}
                       />
                       
                       {/* Layer 3: Main Red Playback Line */}
                       <div 
-                        className="absolute left-0 top-0 h-full bg-red-600 rounded-full pointer-events-none"
-                        style={{ width: `${(currentTime / (duration || 1)) * 100}%` }}
-                      />
-
-                      {/* YouTube style Knob/Scrubber */}
-                      <div 
-                        className={`absolute top-1/2 -translate-y-1/2 w-3.5 h-3.5 bg-red-600 rounded-full pointer-events-none transition-transform duration-150 shadow-md ${isDraggingSeek ? 'scale-100' : 'scale-0 group-hover/progress:scale-100'}`}
-                        style={{ 
-                          left: `${(currentTime / (duration || 1)) * 100}%`,
-                          transform: `translate(-50%, -50%)`
-                        }}
+                        className="absolute left-0 top-0 h-full bg-red-600 pointer-events-none z-20"
+                        style={{ width: `${duration > 0 ? (currentTime / duration) * 100 : 0}%` }}
                       />
                     </div>
+                    {/* YouTube style Knob/Scrubber - Outside overflow-hidden so it's not clipped */}
+                    <div 
+                      className={`absolute top-1/2 -translate-y-1/2 w-4 h-4 bg-red-600 rounded-full pointer-events-none transition-transform duration-150 shadow-md z-30 ${isDraggingSeek ? 'scale-100' : 'scale-0 group-hover/progress:scale-100'}`}
+                      style={{ 
+                        left: `${duration > 0 ? (currentTime / duration) * 100 : 0}%`,
+                        transform: `translate(-50%, -50%)`
+                      }}
+                    />
                   </div>
 
                   {/* Controls Row */}
