@@ -33,10 +33,12 @@ import {
   Music,
   FileArchive,
   ImageIcon,
-  FileText
+  FileText,
+  ChevronDown,
+  Server
 } from 'lucide-react';
 
-import { StorageItem, ActiveTab, ViewMode } from './types';
+import { StorageItem, ActiveTab, ViewMode, StorageProvider } from './types';
 import { motion, AnimatePresence } from 'motion/react';
 import LandingPage from './components/LandingPage';
 import FilePreviewModal from './components/FilePreviewModal';
@@ -71,12 +73,193 @@ const getTabFromPath = (pathname: string): { tab: ActiveTab; folderId: string | 
   return { tab: 'files', folderId: null };
 };
 
+// Custom Premium Animated Server Selector Component
+interface ServerDropdownProps {
+  storageProviders: StorageProvider[];
+  selectedStorageId: string;
+  setSelectedStorageId: (id: string) => void;
+  isMobilePopover?: boolean;
+}
+
+function ServerDropdown({
+  storageProviders,
+  selectedStorageId,
+  setSelectedStorageId,
+  isMobilePopover = false
+}: ServerDropdownProps) {
+  const [isOpen, setIsOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const getProviderDetails = (providerType: 'b2' | 'mega' | 'r2') => {
+    switch (providerType) {
+      case 'b2':
+        return {
+          label: 'Server 1',
+          name: 'Backblaze B2',
+          desc: 'High-speed secure object storage',
+          color: 'from-orange-500 to-amber-500',
+          dotColor: '#ff6200',
+          badge: 'B2',
+          logo: '🚀'
+        };
+      case 'mega':
+        return {
+          label: 'Server 2',
+          name: 'MEGA Cloud',
+          desc: 'End-to-end encrypted storage',
+          color: 'from-red-500 to-rose-600',
+          dotColor: '#ff0000',
+          badge: 'MEGA',
+          logo: '🔴'
+        };
+      case 'r2':
+        return {
+          label: 'Server 3',
+          name: 'Cloudflare R2',
+          desc: 'Ultra-fast egress-free S3 network',
+          color: 'from-blue-500 to-cyan-500',
+          dotColor: '#3b82f6',
+          badge: 'R2',
+          logo: '⚡'
+        };
+      default:
+        return {
+          label: 'Server',
+          name: 'Cloud Storage',
+          desc: 'Active backup service',
+          color: 'from-slate-500 to-slate-600',
+          dotColor: '#64748b',
+          badge: 'CLOUD',
+          logo: '☁️'
+        };
+    }
+  };
+
+  const selectedProvider = storageProviders.find(p => p.id === selectedStorageId);
+  const activeDetails = selectedProvider ? getProviderDetails(selectedProvider.provider) : null;
+
+  if (storageProviders.length === 0) return null;
+
+  return (
+    <div className={`relative ${isMobilePopover ? 'w-full' : 'inline-block'}`} ref={dropdownRef}>
+      <motion.button
+        type="button"
+        whileHover={{ scale: 1.02 }}
+        whileTap={{ scale: 0.98 }}
+        onClick={() => setIsOpen(!isOpen)}
+        className={`w-full flex items-center justify-between gap-3 px-3 py-2 bg-[#1d2430]/95 hover:bg-[#232c3c] border border-white/10 hover:border-[#0095ff]/50 rounded-xl text-xs font-semibold text-white transition-all duration-200 cursor-pointer shadow-lg select-none focus:outline-none`}
+      >
+        <div className="flex items-center gap-2.5 min-w-0">
+          {activeDetails ? (
+            <>
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75" style={{ backgroundColor: activeDetails.dotColor }} />
+                <span className="relative inline-flex rounded-full h-2 w-2" style={{ backgroundColor: activeDetails.dotColor }} />
+              </span>
+              <span className={`text-[9px] font-bold font-mono px-1.5 py-0.5 rounded bg-gradient-to-r ${activeDetails.color} text-white shadow-sm`}>
+                {activeDetails.label}
+              </span>
+              <span className="text-slate-200 font-medium truncate max-w-[120px] sm:max-w-none">
+                {activeDetails.name}
+              </span>
+            </>
+          ) : (
+            <span className="text-slate-400">Select Backup Server</span>
+          )}
+        </div>
+        <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform duration-300 ${isOpen ? 'rotate-180' : ''}`} />
+      </motion.button>
+
+      <AnimatePresence>
+        {isOpen && (
+          <motion.div
+            initial={{ opacity: 0, y: -10, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -10, scale: 0.95 }}
+            transition={{ duration: 0.15, ease: 'easeOut' }}
+            className={`absolute ${isMobilePopover ? 'bottom-full left-0 right-0 mb-2' : 'right-0 mt-2 w-64'} bg-[#131924]/98 border border-white/10 rounded-2xl p-2 shadow-2xl z-50 backdrop-blur-xl origin-bottom`}
+          >
+            <div className="px-2.5 py-1.5 border-b border-white/5 mb-2 flex items-center justify-between">
+              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider font-mono">
+                STORAGE SERVICES
+              </span>
+              <span className="text-[9px] font-mono bg-white/5 text-slate-400 px-1 py-0.2 rounded">
+                Active Cluster
+              </span>
+            </div>
+            
+            <div className="space-y-1">
+              {storageProviders.map((p, index) => {
+                const details = getProviderDetails(p.provider);
+                const isSelected = p.id === selectedStorageId;
+                
+                return (
+                  <motion.button
+                    key={p.id}
+                    type="button"
+                    whileHover={{ x: 2, backgroundColor: 'rgba(255, 255, 255, 0.05)' }}
+                    onClick={() => {
+                      setSelectedStorageId(p.id);
+                      setIsOpen(false);
+                    }}
+                    className={`w-full flex items-center justify-between text-left p-2 rounded-xl transition-all duration-150 cursor-pointer ${
+                      isSelected 
+                        ? 'bg-[#0095ff]/10 text-white border border-[#0095ff]/20 shadow-sm' 
+                        : 'text-slate-300 hover:text-white border border-transparent'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <div className={`relative flex-shrink-0 w-8 h-8 rounded-lg bg-slate-900 border ${isSelected ? 'border-[#0095ff]/30' : 'border-white/5'} flex items-center justify-center font-bold text-xs`}>
+                        <span className="text-sm">{details.logo}</span>
+                        <span className="w-1.5 h-1.5 rounded-full absolute -top-0.5 -right-0.5 shadow-sm" style={{ backgroundColor: details.dotColor }} />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <span className={`text-[9px] font-bold font-mono px-1 py-0.2 rounded bg-gradient-to-r ${details.color} text-white`}>
+                            {details.label}
+                          </span>
+                          <span className="text-xs font-semibold truncate">{details.name}</span>
+                        </div>
+                        <p className="text-[9px] text-slate-400 truncate mt-0.5">{details.desc}</p>
+                      </div>
+                    </div>
+                    {isSelected && (
+                      <motion.div
+                        layoutId="activeIndicator"
+                        className="flex-shrink-0 ml-1"
+                      >
+                        <Check className="w-4 h-4 text-[#0095ff]" />
+                      </motion.div>
+                    )}
+                  </motion.button>
+                );
+              })}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
 export default function App() {
   // Authentication State
   const [user, setUser] = useState<{ email: string; name: string } | null>(null);
   const [authError, setAuthError] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
   const [storageQuotaGb, setStorageQuotaGb] = useState<number>(15);
+  const [storageProviders, setStorageProviders] = useState<StorageProvider[]>([]);
+  const [selectedStorageId, setSelectedStorageId] = useState<string>('');
 
   // Load dynamic storage configuration on mount
   useEffect(() => {
@@ -89,12 +272,18 @@ export default function App() {
         if (data && typeof data.storageQuotaGb === 'number') {
           setStorageQuotaGb(data.storageQuotaGb);
         }
+        if (data && data.storageProviders) {
+          setStorageProviders(data.storageProviders);
+          if (data.storageProviders.length > 0) {
+            setSelectedStorageId(data.storageProviders[0].id);
+          }
+        }
         if (data && data.firebaseConfig) {
           initializeFirebaseClient(data.firebaseConfig);
         }
       })
       .catch(err => {
-        console.warn('Could not load dynamic storage quota, using fallback of 15 GB:', err);
+        console.warn('Could not load dynamic storage config, using fallback:', err);
       });
   }, []);
 
@@ -694,6 +883,45 @@ export default function App() {
     const CHUNK_SIZE = 5 * 1024 * 1024; // 5 MB chunks
 
     try {
+      const selectedProviderObj = storageProviders.find(p => p.id === selectedStorageId);
+      
+      if (selectedProviderObj?.provider === 'mega') {
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('storageAccountId', selectedStorageId);
+        formData.append('parentId', currentFolderId || '');
+        formData.append('ownerEmail', user?.email || 'anonymous');
+        
+        await new Promise<void>((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open('POST', '/api/upload/mega', true);
+          xhr.upload.onprogress = (e) => {
+              if (e.lengthComputable) {
+                  setUploadProgress(Math.min(99, Math.round((e.loaded / e.total) * 100)));
+              }
+          };
+          xhr.onload = () => {
+              if (xhr.status >= 200 && xhr.status < 300) {
+                  resolve();
+              } else {
+                  reject(new Error(`Upload to MEGA failed: ${xhr.statusText}`));
+              }
+          };
+          xhr.onerror = () => reject(new Error('Network error during MEGA upload'));
+          xhr.onabort = () => reject(new Error('Upload canceled by user'));
+          
+          activeXhrsRef.current.push(xhr);
+          xhr.send(formData);
+        });
+        
+        setUploadProgress(100);
+        setUploading(false);
+        setUploadProgress(0);
+        setCurrentUploadingName('');
+        fetchBackendFiles();
+        return;
+      }
+
       if (file.size <= CHUNK_SIZE) {
         // --- SINGLE-PART UPLOAD (For files <= 5MB) ---
         const presignRes = await fetch('/api/upload/presign', {
@@ -703,7 +931,8 @@ export default function App() {
             fileName: file.name,
             fileSize: file.size,
             fileType: file.type || 'application/octet-stream',
-            ownerEmail: user?.email || 'anonymous'
+            ownerEmail: user?.email || 'anonymous',
+            storageAccountId: selectedStorageId
           })
         });
 
@@ -814,7 +1043,8 @@ export default function App() {
             fileName: file.name,
             fileSize: file.size,
             fileType: file.type || 'application/octet-stream',
-            ownerEmail: user?.email || 'anonymous'
+            ownerEmail: user?.email || 'anonymous',
+            storageAccountId: selectedStorageId
           })
         });
 
@@ -1227,6 +1457,14 @@ export default function App() {
 
           {/* Server Sync Indicator & Avatar */}
           <div className="flex items-center gap-4">
+            <div className="hidden md:block">
+              <ServerDropdown
+                storageProviders={storageProviders}
+                selectedStorageId={selectedStorageId}
+                setSelectedStorageId={setSelectedStorageId}
+              />
+            </div>
+            
             <div className="bg-slate-900/60 border border-white/5 px-3 sm:px-4 py-1.5 rounded-full flex items-center gap-2 text-[10px] text-slate-400">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
               <span className="hidden xs:inline font-semibold">Active Server: Railway</span>
@@ -2209,6 +2447,18 @@ export default function App() {
                 <UploadCloud className="w-4 h-4 text-[#0095ff]" />
                 <span>Upload file</span>
               </button>
+              
+              {storageProviders.length > 0 && (
+                <div className="md:hidden px-3 pb-3 pt-1 border-b border-white/5 mb-1">
+                  <p className="text-[10px] text-slate-500 mb-1.5 uppercase font-semibold font-mono tracking-wider">Upload destination:</p>
+                  <ServerDropdown
+                    storageProviders={storageProviders}
+                    selectedStorageId={selectedStorageId}
+                    setSelectedStorageId={setSelectedStorageId}
+                    isMobilePopover={true}
+                  />
+                </div>
+              )}
 
               <button
                 onClick={() => {

@@ -18,3 +18,9 @@ export interface StorageItem {
 
 export type ActiveTab = 'files' | 'recent' | 'starred' | 'trash' | 'account';
 export type ViewMode = 'grid' | 'list';
+
+export interface StorageProvider {
+  id: string;
+  provider: 'b2' | 'r2' | 'mega';
+  name: string;
+}
